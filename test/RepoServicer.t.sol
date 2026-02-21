@@ -221,7 +221,7 @@ contract RepoServicerTest is Test {
 
     function test_checkMargin_revert_sufficient() public {
         uint256 id = _proposeAccept();
-        // Price stays at $1.00 — margin is fine
+        // Price stays at $1.00 - margin is fine
         vm.expectRevert("margin is sufficient");
         servicer.checkMargin(id);
     }
@@ -245,7 +245,7 @@ contract RepoServicerTest is Test {
         priceFeed.setPrice(address(usyc), 960000);
         servicer.checkMargin(id);
 
-        // Top up only 1K — not enough
+        // Top up only 1K - not enough
         vm.prank(borrower);
         servicer.topUpCollateral(id, 1000e6);
 
@@ -438,7 +438,7 @@ contract RepoServicerTest is Test {
         // 2. Accept
         vm.prank(lender);
         servicer.acceptRepo(id);
-        console2.log("2. ACCEPTED — title transfer complete");
+        console2.log("2. ACCEPTED - title transfer complete");
 
         // 3. Yield
         yieldDist.distributeYield(id, 520e6);
@@ -447,13 +447,13 @@ contract RepoServicerTest is Test {
         // 4. Price drop → margin call
         priceFeed.setPrice(address(usyc), 960000);
         servicer.checkMargin(id);
-        console2.log("4. MARGIN CALL — USYC @ $0.96");
+        console2.log("4. MARGIN CALL - USYC @ $0.96");
 
         // 5. Top up
         vm.prank(borrower);
         servicer.topUpCollateral(id, 5000e6);
         assertEq(uint8(servicer.getRepoState(id)), uint8(RepoTypes.RepoState.Active));
-        console2.log("5. TOP UP +5K — margin restored");
+        console2.log("5. TOP UP +5K - margin restored");
 
         // 6. Substitution request
         vm.prank(borrower);
