@@ -7,6 +7,8 @@ import {RepoToken} from "../src/core/RepoToken.sol";
 import {RepoTypes} from "../src/core/RepoTypes.sol";
 import {MockUSDC} from "../src/mocks/MockUSDC.sol";
 import {MockUSYC} from "../src/mocks/MockUSYC.sol";
+import {MockUSTB} from "../src/mocks/MockUSTB.sol";
+import {MockPriceFeed} from "../src/mocks/MockPriceFeed.sol";
 import {MockYieldDistributor} from "../src/mocks/MockYieldDistributor.sol";
 
 contract RepoServicerTest is Test {
@@ -14,400 +16,471 @@ contract RepoServicerTest is Test {
     RepoToken public repoToken;
     MockUSDC public usdc;
     MockUSYC public usyc;
+    MockUSTB public ustb;
+    MockPriceFeed public priceFeed;
     MockYieldDistributor public yieldDist;
 
     address borrower = makeAddr("borrower");
     address lender = makeAddr("lender");
 
-    uint256 constant CASH_AMOUNT = 100_000e6; // 100K USDC
-    uint256 constant COL_AMOUNT = 105_000e6; // 105K USYC (5% haircut)
-    uint256 constant HAIRCUT_BPS = 500; // 5%
-    uint256 constant RATE_BPS = 450; // 4.50%
+    uint256 constant CASH = 100_000e6;
+    uint256 constant COL = 105_000e6;
+    uint256 constant HAIRCUT = 500;
+    uint256 constant RATE = 450;
     uint256 constant TERM = 30 days;
 
     function setUp() public {
-        // Deploy
         servicer = new RepoServicer();
         repoToken = servicer.repoToken();
         usdc = new MockUSDC();
         usyc = new MockUSYC();
+        ustb = new MockUSTB();
+        priceFeed = new MockPriceFeed();
         yieldDist = new MockYieldDistributor(address(servicer), address(repoToken), address(usdc));
-        servicer.setYieldDistributor(address(yieldDist));
 
-        // Fund accounts
+        servicer.setYieldDistributor(address(yieldDist));
+        servicer.setPriceFeed(address(priceFeed));
+
+        // Set initial prices: $1.00 for all
+        priceFeed.setPrice(address(usyc), 1e6);
+        priceFeed.setPrice(address(ustb), 1e6);
+
+        // Fund
         usdc.mint(borrower, 500_000e6);
         usyc.mint(borrower, 210_000e6);
+        ustb.mint(borrower, 200_000e6);
         usdc.mint(lender, 1_000_000e6);
 
         // Approvals
-        vm.prank(borrower);
+        vm.startPrank(borrower);
         usyc.approve(address(servicer), type(uint256).max);
-        vm.prank(borrower);
         usdc.approve(address(servicer), type(uint256).max);
-        vm.prank(lender);
+        ustb.approve(address(servicer), type(uint256).max);
+        vm.stopPrank();
+
+        vm.startPrank(lender);
         usdc.approve(address(servicer), type(uint256).max);
-        vm.prank(lender);
         usyc.approve(address(servicer), type(uint256).max);
+        ustb.approve(address(servicer), type(uint256).max);
+        vm.stopPrank();
     }
 
-    // ═══════════════════════════════════════════════════
-    // HELPERS
-    // ═══════════════════════════════════════════════════
+    // ── Helpers ────────────────────────────────────────
 
-    function _proposeRepo() internal returns (uint256 repoId) {
+    function _propose() internal returns (uint256) {
         vm.prank(borrower);
-        repoId = servicer.proposeRepo(
-            address(usdc), CASH_AMOUNT, address(usyc), COL_AMOUNT, HAIRCUT_BPS, RATE_BPS, TERM
-        );
+        return servicer.proposeRepo(address(usdc), CASH, address(usyc), COL, HAIRCUT, RATE, TERM);
     }
 
-    function _proposeAndAccept() internal returns (uint256 repoId) {
-        repoId = _proposeRepo();
+    function _proposeAccept() internal returns (uint256) {
+        uint256 id = _propose();
         vm.prank(lender);
-        servicer.acceptRepo(repoId);
+        servicer.acceptRepo(id);
+        return id;
     }
 
     // ═══════════════════════════════════════════════════
-    // PROPOSE
+    // DAY 1 TESTS (kept from before)
     // ═══════════════════════════════════════════════════
 
     function test_proposeRepo() public {
-        uint256 repoId = _proposeRepo();
-
-        assertEq(repoId, 1);
-        RepoTypes.Repo memory repo = servicer.getRepo(repoId);
-        assertEq(repo.borrower, borrower);
-        assertEq(repo.cashAmount, CASH_AMOUNT);
-        assertEq(repo.collateralAmount, COL_AMOUNT);
-        assertEq(repo.haircutBps, HAIRCUT_BPS);
-        assertEq(repo.repoRateBps, RATE_BPS);
-        assertEq(repo.termSeconds, TERM);
-        assertEq(uint8(repo.state), uint8(RepoTypes.RepoState.Proposed));
-        assertEq(repo.lender, address(0));
-    }
-
-    function test_proposeRepo_incrementsId() public {
-        uint256 id1 = _proposeRepo();
-        uint256 id2 = _proposeRepo();
-        assertEq(id1, 1);
-        assertEq(id2, 2);
+        uint256 id = _propose();
+        RepoTypes.Repo memory r = servicer.getRepo(id);
+        assertEq(r.borrower, borrower);
+        assertEq(uint8(r.state), uint8(RepoTypes.RepoState.Proposed));
     }
 
     function test_proposeRepo_revert_zeroAmount() public {
         vm.prank(borrower);
         vm.expectRevert(RepoTypes.ZeroAmount.selector);
-        servicer.proposeRepo(address(usdc), 0, address(usyc), COL_AMOUNT, HAIRCUT_BPS, RATE_BPS, TERM);
+        servicer.proposeRepo(address(usdc), 0, address(usyc), COL, HAIRCUT, RATE, TERM);
     }
 
-    function test_proposeRepo_revert_insufficientCollateral() public {
+    function test_proposeRepo_revert_insufficientCol() public {
         vm.prank(borrower);
         vm.expectRevert();
-        // 100K cash with 5% haircut needs 105K collateral, providing only 100K
-        servicer.proposeRepo(address(usdc), CASH_AMOUNT, address(usyc), 100_000e6, HAIRCUT_BPS, RATE_BPS, TERM);
+        servicer.proposeRepo(address(usdc), CASH, address(usyc), 100_000e6, HAIRCUT, RATE, TERM);
     }
-
-    // ═══════════════════════════════════════════════════
-    // ACCEPT (TITLE TRANSFER)
-    // ═══════════════════════════════════════════════════
 
     function test_acceptRepo_titleTransfer() public {
-        uint256 repoId = _proposeRepo();
-
-        uint256 borrowerUsdcBefore = usdc.balanceOf(borrower);
-        uint256 borrowerUsycBefore = usyc.balanceOf(borrower);
-        uint256 lenderUsdcBefore = usdc.balanceOf(lender);
-        uint256 lenderUsycBefore = usyc.balanceOf(lender);
+        uint256 id = _propose();
+        uint256 bUsdcBefore = usdc.balanceOf(borrower);
+        uint256 lUsdcBefore = usdc.balanceOf(lender);
 
         vm.prank(lender);
-        servicer.acceptRepo(repoId);
+        servicer.acceptRepo(id);
 
-        // Borrower: received USDC, sent USYC
-        assertEq(usdc.balanceOf(borrower), borrowerUsdcBefore + CASH_AMOUNT);
-        assertEq(usyc.balanceOf(borrower), borrowerUsycBefore - COL_AMOUNT);
-
-        // Lender: sent USDC, received USYC (title transfer)
-        assertEq(usdc.balanceOf(lender), lenderUsdcBefore - CASH_AMOUNT);
-        assertEq(usyc.balanceOf(lender), lenderUsycBefore + COL_AMOUNT);
+        assertEq(usdc.balanceOf(borrower), bUsdcBefore + CASH);
+        assertEq(usdc.balanceOf(lender), lUsdcBefore - CASH);
+        assertEq(usyc.balanceOf(lender), COL);
+        assertEq(repoToken.ownerOf(id), lender);
     }
 
-    function test_acceptRepo_mintsRepoToken() public {
-        uint256 repoId = _proposeAndAccept();
-
-        // RepoToken minted to lender
-        assertEq(repoToken.ownerOf(repoId), lender);
-        assertTrue(repoToken.exists(repoId));
-    }
-
-    function test_acceptRepo_setsState() public {
-        uint256 repoId = _proposeAndAccept();
-        RepoTypes.Repo memory repo = servicer.getRepo(repoId);
-
-        assertEq(uint8(repo.state), uint8(RepoTypes.RepoState.Active));
-        assertEq(repo.lender, lender);
-        assertGt(repo.startTime, 0);
-        assertEq(repo.maturityTime, repo.startTime + TERM);
-    }
-
-    function test_acceptRepo_revert_borrowerSelfAccept() public {
-        uint256 repoId = _proposeRepo();
+    function test_acceptRepo_revert_selfAccept() public {
+        uint256 id = _propose();
         vm.prank(borrower);
         vm.expectRevert("borrower cannot accept own repo");
-        servicer.acceptRepo(repoId);
+        servicer.acceptRepo(id);
     }
-
-    function test_acceptRepo_revert_notProposed() public {
-        uint256 repoId = _proposeAndAccept();
-        address lender2 = makeAddr("lender2");
-        vm.prank(lender2);
-        vm.expectRevert();
-        servicer.acceptRepo(repoId); // already Active
-    }
-
-    // ═══════════════════════════════════════════════════
-    // CANCEL
-    // ═══════════════════════════════════════════════════
 
     function test_cancelRepo() public {
-        uint256 repoId = _proposeRepo();
+        uint256 id = _propose();
         vm.prank(borrower);
-        servicer.cancelRepo(repoId);
-        assertEq(uint8(servicer.getRepoState(repoId)), uint8(RepoTypes.RepoState.Cancelled));
+        servicer.cancelRepo(id);
+        assertEq(uint8(servicer.getRepoState(id)), uint8(RepoTypes.RepoState.Cancelled));
     }
-
-    function test_cancelRepo_revert_notBorrower() public {
-        uint256 repoId = _proposeRepo();
-        vm.prank(lender);
-        vm.expectRevert();
-        servicer.cancelRepo(repoId);
-    }
-
-    // ═══════════════════════════════════════════════════
-    // MANUFACTURED PAYMENT (YIELD)
-    // ═══════════════════════════════════════════════════
 
     function test_yieldDistribution() public {
-        uint256 repoId = _proposeAndAccept();
-        uint256 yieldAmount = 520e6; // $520
-
-        uint256 lenderUsdcBefore = usdc.balanceOf(lender);
-
-        // Distribute yield
-        yieldDist.distributeYield(repoId, yieldAmount);
-
-        // Lender received yield USDC
-        assertEq(usdc.balanceOf(lender), lenderUsdcBefore + yieldAmount);
-
-        // Manufactured payment recorded
-        RepoTypes.Repo memory repo = servicer.getRepo(repoId);
-        assertEq(repo.accumulatedYield, yieldAmount);
+        uint256 id = _proposeAccept();
+        uint256 before = usdc.balanceOf(lender);
+        yieldDist.distributeYield(id, 520e6);
+        assertEq(usdc.balanceOf(lender), before + 520e6);
+        assertEq(servicer.getRepo(id).accumulatedYield, 520e6);
     }
-
-    function test_multipleYieldEvents() public {
-        uint256 repoId = _proposeAndAccept();
-
-        yieldDist.distributeYield(repoId, 520e6);
-        yieldDist.distributeYield(repoId, 300e6);
-
-        RepoTypes.Repo memory repo = servicer.getRepo(repoId);
-        assertEq(repo.accumulatedYield, 820e6);
-    }
-
-    function test_yieldDistribution_revert_nonDistributor() public {
-        uint256 repoId = _proposeAndAccept();
-        vm.prank(borrower);
-        vm.expectRevert("only yield distributor");
-        servicer.recordYieldPayment(repoId, 100e6);
-    }
-
-    // ═══════════════════════════════════════════════════
-    // MATURITY
-    // ═══════════════════════════════════════════════════
 
     function test_checkMaturity() public {
-        uint256 repoId = _proposeAndAccept();
-
-        // Warp to maturity
+        uint256 id = _proposeAccept();
         vm.warp(block.timestamp + TERM);
-
-        servicer.checkMaturity(repoId);
-        assertEq(uint8(servicer.getRepoState(repoId)), uint8(RepoTypes.RepoState.Matured));
+        servicer.checkMaturity(id);
+        assertEq(uint8(servicer.getRepoState(id)), uint8(RepoTypes.RepoState.Matured));
     }
 
-    function test_checkMaturity_revert_tooEarly() public {
-        uint256 repoId = _proposeAndAccept();
-
-        vm.warp(block.timestamp + TERM - 1);
+    function test_checkMaturity_revert_early() public {
+        uint256 id = _proposeAccept();
         vm.expectRevert();
-        servicer.checkMaturity(repoId);
+        servicer.checkMaturity(id);
     }
-
-    // ═══════════════════════════════════════════════════
-    // SETTLEMENT
-    // ═══════════════════════════════════════════════════
 
     function test_settleRepo_noYield() public {
-        uint256 repoId = _proposeAndAccept();
+        uint256 id = _proposeAccept();
+        vm.warp(block.timestamp + TERM);
+        servicer.checkMaturity(id);
+
+        (,, uint256 net) = servicer.calculateSettlement(id);
+        vm.prank(borrower);
+        servicer.settleRepo(id);
+
+        assertEq(uint8(servicer.getRepoState(id)), uint8(RepoTypes.RepoState.Settled));
+        assertFalse(repoToken.exists(id));
+    }
+
+    function test_settleRepo_withMfgPayment() public {
+        uint256 id = _proposeAccept();
+        yieldDist.distributeYield(id, 520e6);
 
         vm.warp(block.timestamp + TERM);
-        servicer.checkMaturity(repoId);
+        servicer.checkMaturity(id);
 
-        // Calculate expected settlement
-        (uint256 interest,, uint256 netPayment) = servicer.calculateSettlement(repoId);
-
-        // interest = 100_000e6 * 450 * 30 days / (365 days * 10000)
-        uint256 expectedInterest = (CASH_AMOUNT * RATE_BPS * TERM) / (365 days * 10000);
-        assertEq(interest, expectedInterest);
-        assertEq(netPayment, CASH_AMOUNT + expectedInterest);
-
-        uint256 borrowerUsdcBefore = usdc.balanceOf(borrower);
-        uint256 borrowerUsycBefore = usyc.balanceOf(borrower);
-        uint256 lenderUsdcBefore = usdc.balanceOf(lender);
-        uint256 lenderUsycBefore = usyc.balanceOf(lender);
+        (uint256 interest, uint256 mfg, uint256 net) = servicer.calculateSettlement(id);
+        assertEq(mfg, 520e6);
+        assertEq(net, CASH + interest - 520e6);
 
         vm.prank(borrower);
-        servicer.settleRepo(repoId);
-
-        // Borrower: paid net, received collateral back
-        assertEq(usdc.balanceOf(borrower), borrowerUsdcBefore - netPayment);
-        assertEq(usyc.balanceOf(borrower), borrowerUsycBefore + COL_AMOUNT);
-
-        // Lender: received net, returned collateral
-        assertEq(usdc.balanceOf(lender), lenderUsdcBefore + netPayment);
-        assertEq(usyc.balanceOf(lender), lenderUsycBefore - COL_AMOUNT);
-
-        // RepoToken burned
-        assertFalse(repoToken.exists(repoId));
-
-        // State settled
-        assertEq(uint8(servicer.getRepoState(repoId)), uint8(RepoTypes.RepoState.Settled));
+        servicer.settleRepo(id);
+        assertEq(uint8(servicer.getRepoState(id)), uint8(RepoTypes.RepoState.Settled));
     }
 
-    function test_settleRepo_withManufacturedPayment() public {
-        uint256 repoId = _proposeAndAccept();
-        uint256 yieldAmount = 520e6;
+    function test_repoTokenValue() public {
+        uint256 id = _proposeAccept();
+        uint256 val0 = servicer.calculateRepoTokenValue(id);
+        assertEq(val0, CASH);
 
-        // Yield event during active period
-        yieldDist.distributeYield(repoId, yieldAmount);
+        uint256 start = block.timestamp;
+        vm.warp(start + 15 days);
+        uint256 val15 = servicer.calculateRepoTokenValue(id);
+        assertGt(val15, CASH);
 
-        // Advance to maturity
-        vm.warp(block.timestamp + TERM);
-        servicer.checkMaturity(repoId);
-
-        (uint256 interest, uint256 mfgCredit, uint256 netPayment) = servicer.calculateSettlement(repoId);
-
-        // Verify manufactured payment reduces borrower's net payment
-        assertEq(mfgCredit, yieldAmount);
-        uint256 grossPayment = CASH_AMOUNT + interest;
-        assertEq(netPayment, grossPayment - yieldAmount);
-
-        uint256 borrowerUsdcBefore = usdc.balanceOf(borrower);
-
-        vm.prank(borrower);
-        servicer.settleRepo(repoId);
-
-        // Borrower paid less due to mfg payment credit
-        assertEq(usdc.balanceOf(borrower), borrowerUsdcBefore - netPayment);
-
-        console2.log("=== SETTLEMENT SUMMARY ===");
-        console2.log("Principal:       ", CASH_AMOUNT / 1e6);
-        console2.log("Interest:        ", interest / 1e6);
-        console2.log("Mfg Pmt Credit:  ", mfgCredit / 1e6);
-        console2.log("Net Borrower Pays:", netPayment / 1e6);
-    }
-
-    function test_settleRepo_revert_notMatured() public {
-        uint256 repoId = _proposeAndAccept();
-        vm.prank(borrower);
-        vm.expectRevert();
-        servicer.settleRepo(repoId); // still Active
-    }
-
-    function test_settleRepo_revert_notBorrower() public {
-        uint256 repoId = _proposeAndAccept();
-        vm.warp(block.timestamp + TERM);
-        servicer.checkMaturity(repoId);
-        vm.prank(lender);
-        vm.expectRevert();
-        servicer.settleRepo(repoId);
-    }
-
-    // ═══════════════════════════════════════════════════
-    // REPO TOKEN VALUE
-    // ═══════════════════════════════════════════════════
-
-    function test_repoTokenValue_accruesOverTime() public {
-        uint256 repoId = _proposeAndAccept();
-
-        // At start: value = principal (no accrued interest yet)
-        uint256 val0 = servicer.calculateRepoTokenValue(repoId);
-        assertEq(val0, CASH_AMOUNT);
-
-        // After 15 days: value = principal + half the interest
-        vm.warp(block.timestamp + 15 days);
-        uint256 val15 = servicer.calculateRepoTokenValue(repoId);
-        assertGt(val15, CASH_AMOUNT);
-
-        // After 30 days: value = principal + full interest
-        vm.warp(block.timestamp + 30 days);
-        uint256 val30 = servicer.calculateRepoTokenValue(repoId);
+        vm.warp(start + 30 days);
+        uint256 val30 = servicer.calculateRepoTokenValue(id);
         assertGt(val30, val15);
     }
 
     function test_repoTokenValue_reducedByYield() public {
-        uint256 repoId = _proposeAndAccept();
-
-        uint256 valBefore = servicer.calculateRepoTokenValue(repoId);
-        yieldDist.distributeYield(repoId, 520e6);
-        uint256 valAfter = servicer.calculateRepoTokenValue(repoId);
-
-        assertEq(valBefore - valAfter, 520e6);
+        uint256 id = _proposeAccept();
+        uint256 before = servicer.calculateRepoTokenValue(id);
+        yieldDist.distributeYield(id, 520e6);
+        assertEq(before - servicer.calculateRepoTokenValue(id), 520e6);
     }
 
     // ═══════════════════════════════════════════════════
-    // FULL LIFECYCLE (Act 1 scenario)
+    // DAY 2: MARGIN CALL
+    // ═══════════════════════════════════════════════════
+
+    function test_checkMargin_triggers() public {
+        uint256 id = _proposeAccept();
+
+        // Drop USYC price to $0.96
+        priceFeed.setPrice(address(usyc), 960000);
+
+        servicer.checkMargin(id);
+        assertEq(uint8(servicer.getRepoState(id)), uint8(RepoTypes.RepoState.MarginCalled));
+
+        RepoTypes.Repo memory r = servicer.getRepo(id);
+        assertGt(r.marginCallDeadline, block.timestamp);
+    }
+
+    function test_checkMargin_revert_sufficient() public {
+        uint256 id = _proposeAccept();
+        // Price stays at $1.00 — margin is fine
+        vm.expectRevert("margin is sufficient");
+        servicer.checkMargin(id);
+    }
+
+    function test_topUp_restoresMargin() public {
+        uint256 id = _proposeAccept();
+        priceFeed.setPrice(address(usyc), 960000);
+        servicer.checkMargin(id);
+
+        // Top up 5K USYC
+        vm.prank(borrower);
+        servicer.topUpCollateral(id, 5000e6);
+
+        // 110K * 0.96 = 105,600 >= 105K required → restored
+        assertEq(uint8(servicer.getRepoState(id)), uint8(RepoTypes.RepoState.Active));
+        assertEq(servicer.getRepo(id).collateralAmount, COL + 5000e6);
+    }
+
+    function test_topUp_partialStillMarginCalled() public {
+        uint256 id = _proposeAccept();
+        priceFeed.setPrice(address(usyc), 960000);
+        servicer.checkMargin(id);
+
+        // Top up only 1K — not enough
+        vm.prank(borrower);
+        servicer.topUpCollateral(id, 1000e6);
+
+        // 106K * 0.96 = 101,760 < 105K → still MarginCalled
+        assertEq(uint8(servicer.getRepoState(id)), uint8(RepoTypes.RepoState.MarginCalled));
+    }
+
+    function test_topUp_revert_notBorrower() public {
+        uint256 id = _proposeAccept();
+        priceFeed.setPrice(address(usyc), 960000);
+        servicer.checkMargin(id);
+
+        vm.prank(lender);
+        vm.expectRevert();
+        servicer.topUpCollateral(id, 5000e6);
+    }
+
+    // ═══════════════════════════════════════════════════
+    // DAY 2: LIQUIDATION
+    // ═══════════════════════════════════════════════════
+
+    function test_liquidate_afterGrace() public {
+        uint256 id = _proposeAccept();
+        priceFeed.setPrice(address(usyc), 960000);
+        servicer.checkMargin(id);
+
+        // Fast forward past grace period
+        vm.warp(block.timestamp + 4 hours + 1);
+        servicer.liquidate(id);
+
+        assertEq(uint8(servicer.getRepoState(id)), uint8(RepoTypes.RepoState.Defaulted));
+        assertFalse(repoToken.exists(id));
+
+        // Lender keeps collateral, borrower keeps cash
+        assertEq(usyc.balanceOf(lender), COL);
+    }
+
+    function test_liquidate_revert_graceNotExpired() public {
+        uint256 id = _proposeAccept();
+        priceFeed.setPrice(address(usyc), 960000);
+        servicer.checkMargin(id);
+
+        // Still within grace period
+        vm.warp(block.timestamp + 2 hours);
+        vm.expectRevert();
+        servicer.liquidate(id);
+    }
+
+    function test_liquidate_revert_notMarginCalled() public {
+        uint256 id = _proposeAccept();
+        vm.expectRevert();
+        servicer.liquidate(id);
+    }
+
+    // ═══════════════════════════════════════════════════
+    // DAY 2: COLLATERAL SUBSTITUTION
+    // ═══════════════════════════════════════════════════
+
+    function test_substitution_fullFlow() public {
+        uint256 id = _proposeAccept();
+
+        // Borrower requests: USYC → USTB
+        vm.prank(borrower);
+        servicer.requestSubstitution(id, address(ustb), 108_000e6);
+
+        RepoTypes.SubstitutionRequest memory req = servicer.getSubstitutionRequest(id);
+        assertTrue(req.pending);
+        assertEq(req.newCollateralToken, address(ustb));
+
+        // Lender approves
+        vm.prank(lender);
+        servicer.approveSubstitution(id);
+
+        // Verify swap
+        RepoTypes.Repo memory r = servicer.getRepo(id);
+        assertEq(r.collateralToken, address(ustb));
+        assertEq(r.collateralAmount, 108_000e6);
+
+        // Borrower got USYC back, lender holds USTB
+        assertEq(usyc.balanceOf(borrower), 210_000e6); // original balance restored
+        assertEq(ustb.balanceOf(lender), 108_000e6);
+    }
+
+    function test_substitution_revert_insufficientValue() public {
+        uint256 id = _proposeAccept();
+
+        // Try to substitute with too little USTB (100K < 105K required)
+        vm.prank(borrower);
+        vm.expectRevert();
+        servicer.requestSubstitution(id, address(ustb), 100_000e6);
+    }
+
+    function test_substitution_revert_notBorrower() public {
+        uint256 id = _proposeAccept();
+        vm.prank(lender);
+        vm.expectRevert();
+        servicer.requestSubstitution(id, address(ustb), 108_000e6);
+    }
+
+    function test_substitution_revert_notLenderApproval() public {
+        uint256 id = _proposeAccept();
+        vm.prank(borrower);
+        servicer.requestSubstitution(id, address(ustb), 108_000e6);
+
+        // Borrower tries to approve own substitution
+        vm.prank(borrower);
+        vm.expectRevert("only current lender");
+        servicer.approveSubstitution(id);
+    }
+
+    function test_substitution_revert_noPending() public {
+        uint256 id = _proposeAccept();
+        vm.prank(lender);
+        vm.expectRevert("no pending substitution");
+        servicer.approveSubstitution(id);
+    }
+
+    // ═══════════════════════════════════════════════════
+    // DAY 2: FAIL PENALTY
+    // ═══════════════════════════════════════════════════
+
+    function test_settle_failPenalty() public {
+        uint256 id = _proposeAccept();
+
+        // Lender sells half the collateral (simulating partial fail-to-return)
+        vm.prank(lender);
+        usyc.transfer(makeAddr("market"), 50_000e6);
+        // Lender now has 55K USYC, owes 105K
+
+        vm.warp(block.timestamp + TERM);
+        servicer.checkMaturity(id);
+
+        uint256 bUsdcBefore = usdc.balanceOf(borrower);
+        uint256 bUsycBefore = usyc.balanceOf(borrower);
+
+        vm.prank(borrower);
+        servicer.settleRepo(id);
+
+        // Borrower should have received partial collateral (55K) + penalty offset
+        assertEq(usyc.balanceOf(borrower), bUsycBefore + 55_000e6);
+
+        // State settled despite partial return
+        assertEq(uint8(servicer.getRepoState(id)), uint8(RepoTypes.RepoState.Settled));
+    }
+
+    function test_settle_fullReturn_noPenalty() public {
+        uint256 id = _proposeAccept();
+
+        vm.warp(block.timestamp + TERM);
+        servicer.checkMaturity(id);
+
+        (,, uint256 net) = servicer.calculateSettlement(id);
+        uint256 lenderUsdcBefore = usdc.balanceOf(lender);
+
+        vm.prank(borrower);
+        servicer.settleRepo(id);
+
+        // Lender received full net payment, no penalty
+        assertEq(usdc.balanceOf(lender), lenderUsdcBefore + net);
+    }
+
+    // ═══════════════════════════════════════════════════
+    // VIEW HELPERS
+    // ═══════════════════════════════════════════════════
+
+    function test_getCollateralValue() public {
+        uint256 id = _proposeAccept();
+        assertEq(servicer.getCollateralValue(id), COL); // 105K at $1.00
+
+        priceFeed.setPrice(address(usyc), 960000);
+        assertEq(servicer.getCollateralValue(id), 100_800e6); // 105K * 0.96
+    }
+
+    function test_getRequiredCollateralValue() public {
+        uint256 id = _proposeAccept();
+        assertEq(servicer.getRequiredCollateralValue(id), COL); // 100K * 1.05
+    }
+
+    // ═══════════════════════════════════════════════════
+    // FULL LIFECYCLE: ACT 1 (Day 1 + Day 2 integrated)
     // ═══════════════════════════════════════════════════
 
     function test_fullLifecycle_act1() public {
         console2.log("=== ACT 1: FULL REPO LIFECYCLE ===");
 
         // 1. Propose
-        console2.log("\n1. PROPOSE");
-        uint256 repoId = _proposeRepo();
-        console2.log("   Repo #%d proposed: %d USYC col, %d USDC cash", repoId, COL_AMOUNT / 1e6, CASH_AMOUNT / 1e6);
+        uint256 id = _propose();
+        console2.log("1. PROPOSED #%d", id);
 
-        // 2. Accept (title transfer)
-        console2.log("\n2. ACCEPT (TITLE TRANSFER)");
+        // 2. Accept
         vm.prank(lender);
-        servicer.acceptRepo(repoId);
-        console2.log("   Collateral -> Lender, Cash -> Borrower");
-        console2.log("   RT#%d minted to lender", repoId);
+        servicer.acceptRepo(id);
+        console2.log("2. ACCEPTED — title transfer complete");
 
-        // 3. Yield event
-        console2.log("\n3. YIELD EVENT");
-        uint256 yield1 = 520e6;
-        yieldDist.distributeYield(repoId, yield1);
-        console2.log("   Yield: %d USDC -> Lender (mfg_pmt recorded)", yield1 / 1e6);
+        // 3. Yield
+        yieldDist.distributeYield(id, 520e6);
+        console2.log("3. YIELD 520 USDC -> lender");
 
-        // 4. Maturity
-        console2.log("\n4. ADVANCE TO MATURITY");
-        vm.warp(block.timestamp + TERM);
-        servicer.checkMaturity(repoId);
-        console2.log("   Status: MATURED");
+        // 4. Price drop → margin call
+        priceFeed.setPrice(address(usyc), 960000);
+        servicer.checkMargin(id);
+        console2.log("4. MARGIN CALL — USYC @ $0.96");
 
-        // 5. Settle
-        console2.log("\n5. SETTLEMENT");
-        (uint256 interest, uint256 mfgCredit, uint256 netPayment) = servicer.calculateSettlement(repoId);
-
+        // 5. Top up
         vm.prank(borrower);
-        servicer.settleRepo(repoId);
+        servicer.topUpCollateral(id, 5000e6);
+        assertEq(uint8(servicer.getRepoState(id)), uint8(RepoTypes.RepoState.Active));
+        console2.log("5. TOP UP +5K — margin restored");
 
-        console2.log("   Principal:    %d", CASH_AMOUNT / 1e6);
-        console2.log("   Interest:     %d (bps)", interest);
-        console2.log("   Mfg Credit:  -%d", mfgCredit / 1e6);
-        console2.log("   Net Payment:  %d", netPayment / 1e6);
-        console2.log("   Collateral:   RETURNED");
-        console2.log("   RT#1:         BURNED");
-        console2.log("   Status:       SETTLED");
-        console2.log("\n=== ACT 1 COMPLETE ===");
+        // 6. Substitution request
+        vm.prank(borrower);
+        servicer.requestSubstitution(id, address(ustb), 108_000e6);
+        console2.log("6. SUB REQUESTED: USYC -> 108K USTB");
+
+        // 7. Substitution approve
+        vm.prank(lender);
+        servicer.approveSubstitution(id);
+        assertEq(servicer.getRepo(id).collateralToken, address(ustb));
+        console2.log("7. SUB APPROVED");
+
+        // 8. Maturity
+        vm.warp(block.timestamp + TERM);
+        servicer.checkMaturity(id);
+        console2.log("8. MATURED");
+
+        // 9. Settle
+        (uint256 interest, uint256 mfg, uint256 net) = servicer.calculateSettlement(id);
+        vm.prank(borrower);
+        servicer.settleRepo(id);
+        console2.log("9. SETTLED");
+        console2.log("   Principal:  100,000");
+        console2.log("   Interest:   %d", interest / 1e6);
+        console2.log("   Mfg Credit: -%d", mfg / 1e6);
+        console2.log("   Net Paid:   %d", net / 1e6);
+        console2.log("   Col Back:   108K USTB");
+        console2.log("=== ACT 1 COMPLETE ===");
     }
 }

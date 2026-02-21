@@ -6,24 +6,34 @@ import {SafeERC20} from "lib/openzeppelin-contracts/contracts/token/ERC20/utils/
 import {RepoToken} from "./RepoToken.sol";
 import {RepoTypes} from "./RepoTypes.sol";
 
+interface IPriceFeed {
+    function getPrice(address token) external view returns (uint256);
+    function getValue(address token, uint256 amount) external view returns (uint256);
+}
+
 /// @title RepoServicer — P2P Repo Lifecycle Engine
-/// @notice Manages the full lifecycle of repo agreements:
-///         propose → accept (title transfer) → [yield events] → maturity → settle
-/// @dev Day 1 scope: core lifecycle + manufactured payment.
-///      Day 2 will add: margin calls, collateral substitution, fail penalty.
-///      Day 3 will add: rehypothecation (ERC-721 collateral).
+/// @notice Day 1: propose, accept, yield, maturity, settle
+///         Day 2: margin calls, collateral substitution, fail penalty
 contract RepoServicer {
     using SafeERC20 for IERC20;
+
+    // ═══════════════════════════════════════════════════
+    // CONSTANTS
+    // ═══════════════════════════════════════════════════
+
+    uint256 public constant GRACE_PERIOD = 4 hours;
 
     // ═══════════════════════════════════════════════════
     // STATE
     // ═══════════════════════════════════════════════════
 
     RepoToken public immutable repoToken;
-    address public yieldDistributor; // set after deployment
+    address public yieldDistributor;
+    IPriceFeed public priceFeed;
 
     uint256 public nextRepoId = 1;
     mapping(uint256 => RepoTypes.Repo) public repos;
+    mapping(uint256 => RepoTypes.SubstitutionRequest) public substitutionRequests;
 
     // ═══════════════════════════════════════════════════
     // CONSTRUCTOR
@@ -33,19 +43,19 @@ contract RepoServicer {
         repoToken = new RepoToken(address(this));
     }
 
-    /// @notice Set the yield distributor address (one-time setup after deploy)
     function setYieldDistributor(address _yd) external {
         require(yieldDistributor == address(0), "already set");
         yieldDistributor = _yd;
     }
 
+    function setPriceFeed(address _pf) external {
+        priceFeed = IPriceFeed(_pf);
+    }
+
     // ═══════════════════════════════════════════════════
-    // LIFECYCLE
+    // LIFECYCLE (Day 1)
     // ═══════════════════════════════════════════════════
 
-    /// @notice Borrower proposes a new repo
-    /// @dev Borrower must have approved collateralToken for this contract before calling.
-    ///      For Day 1, only ERC-20 collateral is supported.
     function proposeRepo(
         address cashToken,
         uint256 cashAmount,
@@ -61,8 +71,6 @@ contract RepoServicer {
         if (repoRateBps == 0 || repoRateBps > 10000) revert RepoTypes.InvalidRate();
         if (termSeconds == 0 || termSeconds > 365 days) revert RepoTypes.InvalidTerm();
 
-        // Validate haircut: collateralAmount >= cashAmount * (10000 + haircutBps) / 10000
-        // Using collateral amount as proxy for value (1:1 for stablecoins in Day 1)
         uint256 requiredCollateral = (cashAmount * (10000 + haircutBps)) / 10000;
         if (collateralAmount < requiredCollateral) {
             revert RepoTypes.InsufficientCollateral(collateralAmount, requiredCollateral);
@@ -81,20 +89,15 @@ contract RepoServicer {
         repo.haircutBps = haircutBps;
         repo.repoRateBps = repoRateBps;
         repo.termSeconds = termSeconds;
-        repo.failPenaltyBps = 300; // default 3%
+        repo.failPenaltyBps = 300;
         repo.proposedAt = block.timestamp;
         repo.state = RepoTypes.RepoState.Proposed;
 
         emit RepoTypes.RepoProposed(repoId, msg.sender, cashAmount, collateralAmount);
     }
 
-    /// @notice Lender accepts a proposed repo — executes bilateral title transfer
-    /// @dev Lender must have approved cashToken for this contract.
-    ///      Borrower must have approved collateralToken for this contract.
-    ///      Atomic: collateral Borrower→Lender, cash Lender→Borrower
     function acceptRepo(uint256 repoId) external {
         RepoTypes.Repo storage repo = repos[repoId];
-
         if (repo.state != RepoTypes.RepoState.Proposed) {
             revert RepoTypes.InvalidState(repoId, repo.state, RepoTypes.RepoState.Proposed);
         }
@@ -105,19 +108,13 @@ contract RepoServicer {
         repo.startTime = block.timestamp;
         repo.maturityTime = block.timestamp + repo.termSeconds;
 
-        // ── Title Transfer (atomic bilateral exchange) ──
-        // Collateral: Borrower → Lender
         IERC20(repo.collateralToken).safeTransferFrom(repo.borrower, msg.sender, repo.collateralAmount);
-        // Cash: Lender → Borrower
         IERC20(repo.cashToken).safeTransferFrom(msg.sender, repo.borrower, repo.cashAmount);
-
-        // Mint RepoToken to Lender
         repoToken.mint(msg.sender, repoId);
 
         emit RepoTypes.RepoAccepted(repoId, msg.sender);
     }
 
-    /// @notice Cancel a proposed repo (only borrower, only in Proposed state)
     function cancelRepo(uint256 repoId) external {
         RepoTypes.Repo storage repo = repos[repoId];
         if (repo.state != RepoTypes.RepoState.Proposed) {
@@ -130,8 +127,6 @@ contract RepoServicer {
         emit RepoTypes.RepoCancelled(repoId);
     }
 
-    /// @notice Check if repo has reached maturity, transition to Matured state
-    /// @dev Anyone can call this (keeper, borrower, lender)
     function checkMaturity(uint256 repoId) external {
         RepoTypes.Repo storage repo = repos[repoId];
         if (repo.state != RepoTypes.RepoState.Active) {
@@ -144,9 +139,7 @@ contract RepoServicer {
         emit RepoTypes.RepoMatured(repoId);
     }
 
-    /// @notice Settle a matured repo — borrower repays, collateral returned
-    /// @dev Borrower must have approved cashToken for netPayment amount.
-    ///      Current RT holder (lender) must have approved collateralToken for return.
+    /// @notice Settle a matured repo with fail-to-return penalty support
     function settleRepo(uint256 repoId) external {
         RepoTypes.Repo storage repo = repos[repoId];
         if (repo.state != RepoTypes.RepoState.Matured) {
@@ -156,38 +149,187 @@ contract RepoServicer {
             revert RepoTypes.NotBorrower(repoId, msg.sender);
         }
 
-        // Current lender = current RepoToken holder
         address currentLender = repoToken.ownerOf(repoId);
-
-        // ── Settlement math ──
         (uint256 interest, uint256 mfgCredit, uint256 netPayment) = calculateSettlement(repoId);
 
-        // ── Execute settlement ──
-        // 1. Borrower pays net amount to current lender
-        if (netPayment > 0) {
-            IERC20(repo.cashToken).safeTransferFrom(repo.borrower, currentLender, netPayment);
+        // Check lender's collateral balance for fail-to-return
+        uint256 lenderColBal = IERC20(repo.collateralToken).balanceOf(currentLender);
+        uint256 returnable = lenderColBal < repo.collateralAmount ? lenderColBal : repo.collateralAmount;
+        uint256 shortfall = repo.collateralAmount - returnable;
+
+        uint256 penalty = 0;
+        if (shortfall > 0 && address(priceFeed) != address(0)) {
+            uint256 shortfallValue = priceFeed.getValue(repo.collateralToken, shortfall);
+            penalty = (shortfallValue * (10000 + repo.failPenaltyBps)) / 10000;
         }
 
-        // 2. Current lender returns collateral to borrower
-        //    (In Day 1, we assume lender still holds the collateral.
-        //     Day 2 will add fail-to-return penalty logic.)
-        IERC20(repo.collateralToken).safeTransferFrom(currentLender, repo.borrower, repo.collateralAmount);
+        // Execute settlement
+        if (penalty == 0) {
+            // Normal settlement: borrower pays net, lender returns all collateral
+            if (netPayment > 0) {
+                IERC20(repo.cashToken).safeTransferFrom(repo.borrower, currentLender, netPayment);
+            }
+            if (returnable > 0) {
+                IERC20(repo.collateralToken).safeTransferFrom(currentLender, repo.borrower, returnable);
+            }
+        } else {
+            // Fail-to-return: offset penalty against net payment
+            if (netPayment > penalty) {
+                IERC20(repo.cashToken).safeTransferFrom(repo.borrower, currentLender, netPayment - penalty);
+            } else if (penalty > netPayment) {
+                IERC20(repo.cashToken).safeTransferFrom(currentLender, repo.borrower, penalty - netPayment);
+            }
+            // Return whatever collateral lender has
+            if (returnable > 0) {
+                IERC20(repo.collateralToken).safeTransferFrom(currentLender, repo.borrower, returnable);
+            }
+            emit RepoTypes.FailPenaltyCharged(repoId, currentLender, penalty);
+        }
 
-        // 3. Burn RepoToken
         repoToken.burn(repoId);
-
-        // 4. Update state
         repo.state = RepoTypes.RepoState.Settled;
 
-        emit RepoTypes.RepoSettled(repoId, netPayment, repo.collateralAmount);
+        emit RepoTypes.RepoSettled(repoId, netPayment, returnable);
     }
 
     // ═══════════════════════════════════════════════════
-    // YIELD / MANUFACTURED PAYMENT
+    // MARGIN (Day 2)
     // ═══════════════════════════════════════════════════
 
-    /// @notice Record a yield payment for manufactured payment tracking
-    /// @dev Only callable by the YieldDistributor contract
+    /// @notice Check if collateral value breaches haircut requirement
+    function checkMargin(uint256 repoId) external {
+        RepoTypes.Repo storage repo = repos[repoId];
+        if (repo.state != RepoTypes.RepoState.Active) {
+            revert RepoTypes.InvalidState(repoId, repo.state, RepoTypes.RepoState.Active);
+        }
+        require(address(priceFeed) != address(0), "price feed not set");
+
+        uint256 colValue = priceFeed.getValue(repo.collateralToken, repo.collateralAmount);
+        uint256 requiredValue = (repo.cashAmount * (10000 + repo.haircutBps)) / 10000;
+
+        require(colValue < requiredValue, "margin is sufficient");
+
+        repo.state = RepoTypes.RepoState.MarginCalled;
+        repo.marginCallDeadline = block.timestamp + GRACE_PERIOD;
+
+        emit RepoTypes.MarginCallTriggered(repoId, colValue, requiredValue, repo.marginCallDeadline);
+    }
+
+    /// @notice Borrower adds collateral to restore margin
+    function topUpCollateral(uint256 repoId, uint256 additionalAmount) external {
+        RepoTypes.Repo storage repo = repos[repoId];
+        if (repo.state != RepoTypes.RepoState.MarginCalled) {
+            revert RepoTypes.InvalidState(repoId, repo.state, RepoTypes.RepoState.MarginCalled);
+        }
+        if (msg.sender != repo.borrower) {
+            revert RepoTypes.NotBorrower(repoId, msg.sender);
+        }
+        if (additionalAmount == 0) revert RepoTypes.ZeroAmount();
+
+        address currentLender = repoToken.ownerOf(repoId);
+
+        IERC20(repo.collateralToken).safeTransferFrom(msg.sender, currentLender, additionalAmount);
+        repo.collateralAmount += additionalAmount;
+
+        // Check if margin restored
+        if (address(priceFeed) != address(0)) {
+            uint256 newColValue = priceFeed.getValue(repo.collateralToken, repo.collateralAmount);
+            uint256 requiredValue = (repo.cashAmount * (10000 + repo.haircutBps)) / 10000;
+            if (newColValue >= requiredValue) {
+                repo.state = RepoTypes.RepoState.Active;
+                repo.marginCallDeadline = 0;
+            }
+        }
+
+        emit RepoTypes.MarginRestored(repoId, additionalAmount);
+    }
+
+    /// @notice Liquidate after margin call grace period expires
+    function liquidate(uint256 repoId) external {
+        RepoTypes.Repo storage repo = repos[repoId];
+        if (repo.state != RepoTypes.RepoState.MarginCalled) {
+            revert RepoTypes.InvalidState(repoId, repo.state, RepoTypes.RepoState.MarginCalled);
+        }
+        if (block.timestamp < repo.marginCallDeadline) {
+            revert RepoTypes.GracePeriodNotExpired(repoId, repo.marginCallDeadline);
+        }
+
+        repoToken.burn(repoId);
+        repo.state = RepoTypes.RepoState.Defaulted;
+
+        emit RepoTypes.RepoDefaulted(repoId, 0);
+    }
+
+    // ═══════════════════════════════════════════════════
+    // COLLATERAL SUBSTITUTION (Day 2)
+    // ═══════════════════════════════════════════════════
+
+    /// @notice Borrower requests to swap collateral mid-repo
+    function requestSubstitution(
+        uint256 repoId,
+        address newCollateralToken,
+        uint256 newCollateralAmount
+    ) external {
+        RepoTypes.Repo storage repo = repos[repoId];
+        if (repo.state != RepoTypes.RepoState.Active) {
+            revert RepoTypes.InvalidState(repoId, repo.state, RepoTypes.RepoState.Active);
+        }
+        if (msg.sender != repo.borrower) {
+            revert RepoTypes.NotBorrower(repoId, msg.sender);
+        }
+        require(repo.collateralType == RepoTypes.CollateralType.ERC20, "ERC20 only");
+        if (newCollateralAmount == 0) revert RepoTypes.ZeroAmount();
+
+        // Validate new collateral meets haircut
+        if (address(priceFeed) != address(0)) {
+            uint256 newColValue = priceFeed.getValue(newCollateralToken, newCollateralAmount);
+            uint256 requiredValue = (repo.cashAmount * (10000 + repo.haircutBps)) / 10000;
+            if (newColValue < requiredValue) {
+                revert RepoTypes.InsufficientCollateral(newColValue, requiredValue);
+            }
+        }
+
+        substitutionRequests[repoId] = RepoTypes.SubstitutionRequest({
+            newCollateralToken: newCollateralToken,
+            newCollateralAmount: newCollateralAmount,
+            pending: true
+        });
+
+        emit RepoTypes.SubstitutionRequested(repoId, newCollateralToken, newCollateralAmount);
+    }
+
+    /// @notice Lender approves substitution — atomic swap
+    function approveSubstitution(uint256 repoId) external {
+        RepoTypes.Repo storage repo = repos[repoId];
+        if (repo.state != RepoTypes.RepoState.Active) {
+            revert RepoTypes.InvalidState(repoId, repo.state, RepoTypes.RepoState.Active);
+        }
+
+        address currentLender = repoToken.ownerOf(repoId);
+        require(msg.sender == currentLender, "only current lender");
+
+        RepoTypes.SubstitutionRequest storage req = substitutionRequests[repoId];
+        require(req.pending, "no pending substitution");
+
+        address oldToken = repo.collateralToken;
+        uint256 oldAmount = repo.collateralAmount;
+
+        // Atomic swap
+        IERC20(oldToken).safeTransferFrom(currentLender, repo.borrower, oldAmount);
+        IERC20(req.newCollateralToken).safeTransferFrom(repo.borrower, currentLender, req.newCollateralAmount);
+
+        repo.collateralToken = req.newCollateralToken;
+        repo.collateralAmount = req.newCollateralAmount;
+
+        delete substitutionRequests[repoId];
+
+        emit RepoTypes.CollateralSubstituted(repoId, oldToken, oldAmount, repo.collateralToken, repo.collateralAmount);
+    }
+
+    // ═══════════════════════════════════════════════════
+    // YIELD (Day 1)
+    // ═══════════════════════════════════════════════════
+
     function recordYieldPayment(uint256 repoId, uint256 amount) external {
         require(msg.sender == yieldDistributor, "only yield distributor");
         RepoTypes.Repo storage repo = repos[repoId];
@@ -195,9 +337,7 @@ contract RepoServicer {
             repo.state == RepoTypes.RepoState.Active || repo.state == RepoTypes.RepoState.Matured,
             "repo not active"
         );
-
         repo.accumulatedYield += amount;
-
         emit RepoTypes.YieldRecorded(repoId, amount, repo.accumulatedYield);
     }
 
@@ -205,52 +345,53 @@ contract RepoServicer {
     // VIEW FUNCTIONS
     // ═══════════════════════════════════════════════════
 
-    /// @notice Calculate settlement amounts for a repo
     function calculateSettlement(uint256 repoId)
         public
         view
         returns (uint256 interest, uint256 mfgCredit, uint256 netPayment)
     {
         RepoTypes.Repo storage repo = repos[repoId];
-
         uint256 elapsed = repo.maturityTime - repo.startTime;
-        // interest = cashAmount * rateBps * elapsed / (365 days * 10000)
         interest = (repo.cashAmount * repo.repoRateBps * elapsed) / (365 days * 10000);
         mfgCredit = repo.accumulatedYield;
-
-        uint256 grossPayment = repo.cashAmount + interest;
-        if (mfgCredit >= grossPayment) {
-            netPayment = 0;
-        } else {
-            netPayment = grossPayment - mfgCredit;
-        }
+        uint256 gross = repo.cashAmount + interest;
+        netPayment = mfgCredit >= gross ? 0 : gross - mfgCredit;
     }
 
-    /// @notice Calculate the value of a RepoToken (for rehypo margin checks in Day 3)
     function calculateRepoTokenValue(uint256 repoId) external view returns (uint256) {
         RepoTypes.Repo storage repo = repos[repoId];
         if (repo.state != RepoTypes.RepoState.Active && repo.state != RepoTypes.RepoState.Matured) {
             return 0;
         }
-
         uint256 elapsed = block.timestamp < repo.maturityTime
             ? block.timestamp - repo.startTime
             : repo.maturityTime - repo.startTime;
-
-        uint256 accruedInterest = (repo.cashAmount * repo.repoRateBps * elapsed) / (365 days * 10000);
-
-        uint256 gross = repo.cashAmount + accruedInterest;
+        uint256 accrued = (repo.cashAmount * repo.repoRateBps * elapsed) / (365 days * 10000);
+        uint256 gross = repo.cashAmount + accrued;
         if (repo.accumulatedYield >= gross) return 0;
         return gross - repo.accumulatedYield;
     }
 
-    /// @notice Get full repo struct
+    function getCollateralValue(uint256 repoId) external view returns (uint256) {
+        RepoTypes.Repo storage repo = repos[repoId];
+        if (address(priceFeed) == address(0)) return 0;
+        return priceFeed.getValue(repo.collateralToken, repo.collateralAmount);
+    }
+
+    function getRequiredCollateralValue(uint256 repoId) external view returns (uint256) {
+        RepoTypes.Repo storage repo = repos[repoId];
+        return (repo.cashAmount * (10000 + repo.haircutBps)) / 10000;
+    }
+
     function getRepo(uint256 repoId) external view returns (RepoTypes.Repo memory) {
         return repos[repoId];
     }
 
-    /// @notice Get repo state
     function getRepoState(uint256 repoId) external view returns (RepoTypes.RepoState) {
         return repos[repoId].state;
+    }
+
+    function getSubstitutionRequest(uint256 repoId) external view returns (RepoTypes.SubstitutionRequest memory) {
+        return substitutionRequests[repoId];
     }
 }
