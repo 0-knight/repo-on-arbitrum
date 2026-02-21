@@ -348,7 +348,7 @@ contract RepoServicerTest is Test {
         assertGt(val15, CASH_AMOUNT);
 
         // After 30 days: value = principal + full interest
-        vm.warp(block.timestamp + 15 days);
+        vm.warp(block.timestamp + 30 days);
         uint256 val30 = servicer.calculateRepoTokenValue(repoId);
         assertGt(val30, val15);
     }
