@@ -139,19 +139,6 @@ contract RepoServicer {
         emit RepoTypes.RepoMatured(repoId);
     }
 
-    /// @notice Demo only: force maturity regardless of time elapsed.
-    ///         Sets maturityTime so that full term interest is calculated at settlement.
-    function forceMaturity(uint256 repoId) external {
-        RepoTypes.Repo storage repo = repos[repoId];
-        if (repo.state != RepoTypes.RepoState.Active) {
-            revert RepoTypes.InvalidState(repoId, repo.state, RepoTypes.RepoState.Active);
-        }
-        // Set maturityTime as if full term has elapsed
-        repo.maturityTime = repo.startTime + repo.termSeconds;
-        repo.state = RepoTypes.RepoState.Matured;
-        emit RepoTypes.RepoMatured(repoId);
-    }
-
     /// @notice Settle a matured repo with fail-to-return penalty support
     function settleRepo(uint256 repoId) external {
         RepoTypes.Repo storage repo = repos[repoId];

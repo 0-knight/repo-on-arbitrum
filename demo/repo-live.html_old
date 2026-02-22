@@ -1,0 +1,650 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>REPO PROTOCOL - Live</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0e0e0e;overflow:hidden;font-family:'Consolas','SF Mono','Monaco','Menlo',monospace;color:#999;font-size:10px}
+::-webkit-scrollbar{width:3px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:#2a2a2a}
+button{font-family:inherit;transition:all 0.1s;border-radius:0}
+button:hover:not(:disabled){filter:brightness(1.25)}
+button:active:not(:disabled){filter:brightness(0.85)}
+input[type=range]{-webkit-appearance:none;height:2px;background:#2a2a2a;outline:none;border-radius:0;width:100%}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:10px;height:14px;background:#666;border:none;cursor:pointer}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:0.35}}
+@keyframes spin{to{transform:rotate(360deg)}}
+.bk{animation:blink 1.2s infinite}
+.spin{animation:spin 1s linear infinite;display:inline-block}
+table{width:100%;border-collapse:collapse}
+th,td{text-align:left;padding:3px 6px;font-size:10px;border-bottom:1px solid #1a1a1a}
+th{color:#555;font-weight:600;text-transform:uppercase;font-size:9px;letter-spacing:0.08em}
+.r{color:#c44}.g{color:#4a4}.y{color:#a90}.b{color:#58a}.p{color:#86c}.w{color:#ccc}.d{color:#444}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.9.0/ethers.umd.min.js"></script>
+<script type="text/babel">
+const{useState,useCallback,useEffect,useRef}=React;
+const{ethers}=window;
+
+// ═══════════════════════════════════════════════════════
+// CONTRACT CONFIG — UPDATE THESE AFTER DEPLOY
+// ═══════════════════════════════════════════════════════
+const ADDR = {
+  SERVICER:   "0x49A0B51FCa3C764dd8fc098a97ebBF590e25c0D6", // paste RepoServicer address
+  REPO_TOKEN: "0x6F566B9CF354C54A0d0A0fb14bf00ED680E9448A", // paste RepoToken address
+  USDC:       "0x58751AD63D1Ac80C753d407aF2d2332b6A9930f9", // paste MockUSDC address
+  USYC:       "0xE40e340C68f447C55b370B7e06cACdEC5BE253bC", // paste MockUSYC address
+  USTB:       "0xD415d0A3A64481f32281B8F13d8510cD2FB9fd44", // paste MockUSTB address
+  PRICE_FEED: "0x645F8B5B544a11Ca9C244BFfeC1793155dC3BD12", // paste MockPriceFeed address
+  YIELD_DIST: "0x39640aD50884238B299d0b72c14df24bCb3Cfb7c", // paste MockYieldDistributor address
+};
+
+// Minimal ABIs (only functions we call)
+const ABI = {
+  SERVICER: [
+    "function proposeRepo(address,uint256,address,uint256,uint256,uint256,uint256) returns (uint256)",
+    "function acceptRepo(uint256)",
+    "function checkMaturity(uint256)",
+    "function settleRepo(uint256)",
+    "function checkMargin(uint256)",
+    "function topUpCollateral(uint256,uint256)",
+    "function liquidate(uint256)",
+    "function requestSubstitution(uint256,address,uint256)",
+    "function approveSubstitution(uint256)",
+    "function recordYieldPayment(uint256,uint256)",
+    "function calculateSettlement(uint256) view returns (uint256,uint256,uint256)",
+    "function calculateRepoTokenValue(uint256) view returns (uint256)",
+    "function getRepo(uint256) view returns (tuple(uint256 id,address borrower,address lender,address cashToken,uint256 cashAmount,uint8 collateralType,address collateralToken,uint256 collateralAmount,uint256 collateralTokenId,uint256 haircutBps,uint256 repoRateBps,uint256 termSeconds,uint256 failPenaltyBps,uint256 proposedAt,uint256 startTime,uint256 maturityTime,uint8 state,uint256 marginCallDeadline,uint256 accumulatedYield))",
+    "function getRepoState(uint256) view returns (uint8)",
+    "function getCollateralValue(uint256) view returns (uint256)",
+    "function getRequiredCollateralValue(uint256) view returns (uint256)",
+    "function nextRepoId() view returns (uint256)",
+    "event RepoProposed(uint256 indexed repoId, address indexed borrower, uint256 cashAmount, uint256 collateralAmount)",
+    "event RepoAccepted(uint256 indexed repoId, address indexed lender)",
+    "event RepoSettled(uint256 indexed repoId, uint256 netBorrowerPayment, uint256 collateralReturned)",
+    "event MarginCallTriggered(uint256 indexed repoId, uint256 collateralValue, uint256 requiredValue, uint256 deadline)",
+    "event MarginRestored(uint256 indexed repoId, uint256 addedAmount)",
+    "event CollateralSubstituted(uint256 indexed repoId, address oldToken, uint256 oldAmount, address newToken, uint256 newAmount)",
+  ],
+  ERC20: [
+    "function balanceOf(address) view returns (uint256)",
+    "function approve(address,uint256) returns (bool)",
+    "function allowance(address,address) view returns (uint256)",
+    "function mint(address,uint256)",
+    "function decimals() view returns (uint8)",
+  ],
+  REPO_TOKEN: [
+    "function ownerOf(uint256) view returns (address)",
+    "function balanceOf(address) view returns (uint256)",
+  ],
+  PRICE_FEED: [
+    "function setPrice(address,uint256)",
+    "function getPrice(address) view returns (uint256)",
+    "function getValue(address,uint256) view returns (uint256)",
+  ],
+  YIELD_DIST: [
+    "function distributeYield(uint256,uint256)",
+  ],
+};
+
+const STATES = ["PROPOSED","ACTIVE","MARGIN_CALLED","MATURED","SETTLED","DEFAULTED","CANCELLED"];
+const stc = s => ({"PROPOSED":"y","ACTIVE":"g","MARGIN_CALLED":"r","MATURED":"y","SETTLED":"d","DEFAULTED":"r"}[s]||"d");
+const D6 = 1000000n;
+const fmt = (v) => {
+  if(typeof v === 'bigint') v = Number(v) / 1e6;
+  return Number(v).toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2});
+};
+const fmtK = (v) => {
+  if(typeof v === 'bigint') v = Number(v) / 1e6;
+  return v>=1e6?`${(v/1e6).toFixed(1)}M`:v>=1000?`${(v/1000).toFixed(0)}K`:`${v}`;
+};
+const short = (a) => a ? `${a.slice(0,6)}..${a.slice(-4)}` : "--";
+const T=()=>[new Date().getHours(),new Date().getMinutes(),new Date().getSeconds()].map(v=>String(v).padStart(2,'0')).join(':');
+
+// ── Components ─────────────────────────────────────────
+const Btn=({children,onClick,disabled,active,warn,loading,style:s})=>(
+  <button onClick={onClick} disabled={disabled||loading} className={active&&!loading?"bk":""} style={{
+    padding:"3px 8px",fontSize:"9.5px",fontWeight:600,
+    background:disabled?"#151515":loading?"#1a1a00":warn?"#2a1111":active?"#112211":"#1e1e1e",
+    color:disabled?"#2a2a2a":loading?"#a90":warn?"#c44":active?"#4a4":"#777",
+    border:`1px solid ${disabled?"#1a1a1a":loading?"#333300":warn?"#3a1111":active?"#1a3a1a":"#2a2a2a"}`,
+    cursor:disabled||loading?"default":"pointer",letterSpacing:"0.03em",...s
+  }}>{loading?<><span className="spin">*</span> TX...</>:children}</button>
+);
+
+const Log=({time,text,c=""})=>(
+  <div style={{display:"flex",gap:6,padding:"1.5px 0",fontSize:10,lineHeight:1.4,borderBottom:"1px solid #111"}}>
+    <span style={{color:"#333",flexShrink:0,fontVariantNumeric:"tabular-nums"}}>{time}</span>
+    <span className={c}>{text}</span>
+  </div>
+);
+
+// ═══════════════════════════════════════════════════════
+// APP
+// ═══════════════════════════════════════════════════════
+function App(){
+  const[wallet,setWallet]=useState(null);     // current address
+  const[signer,setSigner]=useState(null);     // ethers signer
+  const[provider,setProvider]=useState(null);
+  const[loading,setLoading]=useState("");     // which action is loading
+  const[ef,setEf]=useState([]);               // event feed
+  const[hint,setHint]=useState("Connect wallet to begin");
+
+  // On-chain state
+  const[repoId,setRepoId]=useState(0);
+  const[repo,setRepo]=useState(null);         // full repo struct
+  const[repoState,setRepoState]=useState("");
+  const[bBal,setBBal]=useState({usdc:0n,usyc:0n,ustb:0n});
+  const[lBal,setLBal]=useState({usdc:0n,usyc:0n,ustb:0n});
+  const[borrowerAddr,setBorrowerAddr]=useState("");
+  const[lenderAddr,setLenderAddr]=useState("");
+  const[usycPrice,setUsycPrice]=useState(1.0);
+  const[colValue,setColValue]=useState(0n);
+  const[reqValue,setReqValue]=useState(0n);
+  const[settlement,setSettlement]=useState(null);
+  const[rtHolder,setRtHolder]=useState("");
+
+  const ae=useCallback((t,c="")=>setEf(p=>[{t,c,ts:T(),id:Math.random()},...p].slice(0,40)),[]);
+
+  // ── Connect Wallet ─────────────────────────────────
+  const connect = async()=>{
+    if(!window.ethereum){alert("Install MetaMask");return}
+    try{
+      const p = new ethers.BrowserProvider(window.ethereum);
+      await p.send("eth_requestAccounts",[]);
+
+      // Bug-fix: Override fee data to avoid "max fee less than base fee" on Arbitrum
+      const origFee = p.getFeeData.bind(p);
+      p.getFeeData = async()=>{
+        const fee = await origFee();
+        const base = fee.maxFeePerGas || 0n;
+        const boosted = base * 3n / 2n + 1000000n;
+        return {maxFeePerGas:boosted, maxPriorityFeePerGas:fee.maxPriorityFeePerGas||1000000n, gasPrice:boosted};
+      };
+
+
+      const s = await p.getSigner();
+      const addr = await s.getAddress();
+      setProvider(p);setSigner(s);setWallet(addr);
+      ae(`WALLET CONNECTED: ${short(addr)}`,"g");
+      setHint("BORROWER >> NEW REPO (or load existing repo ID)");
+    }catch(e){ae(`CONNECT ERROR: ${e.message}`,"r")}
+  };
+
+  // Listen for account changes
+  useEffect(()=>{
+    if(!window.ethereum)return;
+    const h = (accounts)=>{
+      if(accounts.length>0){
+        setWallet(accounts[0]);
+        ae(`WALLET SWITCHED: ${short(accounts[0])}`,"b");
+      }
+    };
+    window.ethereum.on('accountsChanged',h);
+    return()=>window.ethereum.removeListener('accountsChanged',h);
+  },[]);
+
+  // Re-init signer on wallet change
+  useEffect(()=>{
+    if(!provider||!wallet)return;
+    (async()=>{
+      const s=await provider.getSigner();
+      setSigner(s);
+    })();
+  },[wallet,provider]);
+
+  // ── Contract helpers ───────────────────────────────
+  const getServicer=()=>new ethers.Contract(ADDR.SERVICER,ABI.SERVICER,signer);
+  const getERC20=(addr)=>new ethers.Contract(addr,ABI.ERC20,signer);
+  const getPriceFeed=()=>new ethers.Contract(ADDR.PRICE_FEED,ABI.PRICE_FEED,signer);
+  const getYieldDist=()=>new ethers.Contract(ADDR.YIELD_DIST,ABI.YIELD_DIST,signer);
+  const getRepoToken=()=>new ethers.Contract(ADDR.REPO_TOKEN,ABI.REPO_TOKEN,signer);
+
+  const ensureApproval=async(tokenAddr,amount)=>{
+    const token=getERC20(tokenAddr);
+    const allowance=await token.allowance(wallet,ADDR.SERVICER);
+    if(allowance<amount){
+      ae(`APPROVING ${short(tokenAddr)} for servicer...`,"d");
+      const tx=await token.approve(ADDR.SERVICER,ethers.MaxUint256);
+      await tx.wait();
+      ae("APPROVED","g");
+    }
+  };
+
+  // ── Refresh on-chain state ─────────────────────────
+  const refresh=async(rid)=>{
+    if(!signer||!rid||rid===0)return;
+    try{
+      const s=getServicer();
+      const r=await s.getRepo(rid);
+      const state=STATES[Number(r.state)]||"UNKNOWN";
+      setRepo(r);
+      setRepoState(state);
+      setBorrowerAddr(r.borrower);
+      setLenderAddr(r.lender);
+
+      // Balances
+      const usdc=getERC20(ADDR.USDC);
+      const usyc=getERC20(ADDR.USYC);
+      const ustb=getERC20(ADDR.USTB);
+
+      if(r.borrower!==ethers.ZeroAddress){
+        const bu=await usdc.balanceOf(r.borrower);
+        const by=await usyc.balanceOf(r.borrower);
+        const bt=await ustb.balanceOf(r.borrower);
+        setBBal({usdc:bu,usyc:by,ustb:bt});
+      }
+      if(r.lender!==ethers.ZeroAddress){
+        const lu=await usdc.balanceOf(r.lender);
+        const ly=await usyc.balanceOf(r.lender);
+        const lt=await ustb.balanceOf(r.lender);
+        setLBal({usdc:lu,usyc:ly,ustb:lt});
+      }
+
+      // Collateral value
+      try{
+        const cv=await s.getCollateralValue(rid);
+        const rv=await s.getRequiredCollateralValue(rid);
+        setColValue(cv);setReqValue(rv);
+      }catch(e){}
+
+      // Settlement calc
+      if(state==="MATURED"||state==="SETTLED"){
+        try{
+          const[int,mfg,net]=await s.calculateSettlement(rid);
+          setSettlement({int,mfg,net});
+        }catch(e){}
+      }
+
+      // RT holder
+      if(state==="ACTIVE"||state==="MATURED"||state==="MARGIN_CALLED"){
+        try{
+          const rt=getRepoToken();
+          const holder=await rt.ownerOf(rid);
+          setRtHolder(holder);
+        }catch(e){setRtHolder("")}
+      }else{setRtHolder("")}
+
+      // USYC price
+      try{
+        const pf=getPriceFeed();
+        const p=await pf.getPrice(ADDR.USYC);
+        setUsycPrice(Number(p)/1e6);
+      }catch(e){}
+
+    }catch(e){console.error("refresh error",e)}
+  };
+
+  // Auto-refresh every 5s
+  useEffect(()=>{
+    if(!signer||!repoId)return;
+    refresh(repoId);
+    const iv=setInterval(()=>refresh(repoId),5000);
+    return()=>clearInterval(iv);
+  },[signer,repoId]);
+
+  // ── Actions ────────────────────────────────────────
+  const wrap=async(name,fn)=>{
+    setLoading(name);
+    try{
+      await fn();
+      await refresh(repoId||1);
+    }catch(e){
+      ae(`ERROR: ${e.reason||e.message}`,"r");
+    }
+    setLoading("");
+  };
+
+  const doPropose=()=>wrap("propose",async()=>{
+    await ensureApproval(ADDR.USYC, 105000n*D6);
+    const s=getServicer();
+    ae("PROPOSE: 105K USYC / 100K USDC / 4.50% / 60s ...","y");
+    //const tx=await s.proposeRepo(ADDR.USDC,100000n*D6,ADDR.USYC,105000n*D6,500,450,60);
+    const tx=await s.proposeRepo(ADDR.USDC,100000n*D6,ADDR.USYC,105000n*D6,500,9000,60);
+
+    const receipt=await tx.wait();
+    // Parse repoId from event
+    const ev=receipt.logs.map(l=>{try{return s.interface.parseLog(l)}catch(e){return null}}).find(e=>e&&e.name==="RepoProposed");
+    const rid=ev?Number(ev.args.repoId):1;
+    setRepoId(rid);
+    ae(`PROPOSED #${rid} tx=${short(tx.hash)}`,"g");
+    setHint("Switch to LENDER wallet in MetaMask >> ACCEPT #"+rid);
+  });
+
+  const doAccept=()=>wrap("accept",async()=>{
+    await ensureApproval(ADDR.USDC, 100000n*D6);
+    const s=getServicer();
+    ae(`ACCEPT #${repoId} ...`,"b");
+    const tx=await s.acceptRepo(repoId);
+    await tx.wait();
+    ae(`ACCEPTED #${repoId} - TITLE TRANSFER tx=${short(tx.hash)}`,"g");
+    setHint("PROTOCOL >> TRIGGER YIELD");
+  });
+
+  const doYield=()=>wrap("yield",async()=>{
+    const yd=getYieldDist();
+    ae(`YIELD +520 USDC on #${repoId} ...`,"y");
+    const tx=await yd.distributeYield(repoId,520n*D6);
+    await tx.wait();
+    ae(`YIELD DISTRIBUTED tx=${short(tx.hash)}`,"g");
+    setHint("PROTOCOL >> SET PRICE to trigger margin call");
+  });
+
+  const doSetPrice=async(price)=>{
+    if(!signer)return;
+    setLoading("price");
+    try{
+      const pf=getPriceFeed();
+      const priceBig=BigInt(Math.round(price*1e6));
+      const tx=await pf.setPrice(ADDR.USYC,priceBig);
+      await tx.wait();
+      setUsycPrice(price);
+      ae(`PRICE SET: USYC = $${price.toFixed(4)}`,"y");
+      if(price<=0.97){
+        setHint("PROTOCOL >> CHECK MARGIN");
+      }
+    }catch(e){ae(`PRICE ERROR: ${e.reason||e.message}`,"r")}
+    setLoading("");
+  };
+
+  const doCheckMargin=()=>wrap("margin",async()=>{
+    const s=getServicer();
+    ae(`CHECK MARGIN #${repoId} ...`,"r");
+    const tx=await s.checkMargin(repoId);
+    await tx.wait();
+    ae(`MARGIN CALL TRIGGERED tx=${short(tx.hash)}`,"r");
+    setHint("Switch to BORROWER wallet >> TOP UP");
+  });
+
+  const doTopUp=()=>wrap("topup",async()=>{
+    await ensureApproval(ADDR.USYC, 5000n*D6);
+    const s=getServicer();
+    ae(`TOP UP +5K USYC on #${repoId} ...`,"g");
+    const tx=await s.topUpCollateral(repoId,5000n*D6);
+    await tx.wait();
+    ae(`TOP UP DONE tx=${short(tx.hash)}`,"g");
+    setHint("BORROWER >> REQUEST SUBSTITUTION");
+  });
+
+  const doSubReq=()=>wrap("subreq",async()=>{
+    await ensureApproval(ADDR.USTB, 108000n*D6);
+    const s=getServicer();
+    ae(`SUB REQUEST: USYC -> 108K USTB on #${repoId} ...`,"b");
+    const tx=await s.requestSubstitution(repoId,ADDR.USTB,108000n*D6);
+    await tx.wait();
+    ae(`SUB REQUESTED tx=${short(tx.hash)}`,"g");
+    setHint("Switch to LENDER wallet >> APPROVE SUB");
+  });
+
+  const doSubApprove=()=>wrap("subappr",async()=>{
+    // Lender needs to approve old collateral for servicer to pull back
+    const colToken = repo ? repo.collateralToken : ADDR.USYC;
+    await ensureApproval(colToken, 200000n*D6);
+    const s=getServicer();
+    ae(`APPROVE SUBSTITUTION #${repoId} ...`,"b");
+    const tx=await s.approveSubstitution(repoId);
+    await tx.wait();
+    ae(`SUBSTITUTION DONE tx=${short(tx.hash)}`,"g");
+    setHint("Wait for maturity (60s) >> CHECK MATURITY");
+  });
+
+  const doCheckMaturity=()=>wrap("maturity",async()=>{
+    const s=getServicer();
+    ae(`CHECK MATURITY #${repoId} ...`,"y");
+    const tx=await s.checkMaturity(repoId);
+    await tx.wait();
+    ae(`MATURED tx=${short(tx.hash)}`,"g");
+    setHint("Switch to BORROWER wallet >> SETTLE");
+  });
+
+  const doSettle=()=>wrap("settle",async()=>{
+    await ensureApproval(ADDR.USDC, 200000n*D6);
+    const s=getServicer();
+    ae(`SETTLE #${repoId} ...`,"g");
+    const tx=await s.settleRepo(repoId);
+    await tx.wait();
+    ae(`SETTLED tx=${short(tx.hash)}`,"g");
+    setHint("COMPLETE - Repo lifecycle finished");
+  });
+
+  const doLiquidate=()=>wrap("liquidate",async()=>{
+    const s=getServicer();
+    ae(`LIQUIDATE #${repoId} ...`,"r");
+    const tx=await s.liquidate(repoId);
+    await tx.wait();
+    ae(`LIQUIDATED tx=${short(tx.hash)}`,"r");
+    setHint("DEFAULTED");
+  });
+
+  // ── Identify role ──────────────────────────────────
+  const isBorrower = wallet && borrowerAddr && wallet.toLowerCase()===borrowerAddr.toLowerCase();
+  const isLender = wallet && lenderAddr && wallet.toLowerCase()===lenderAddr.toLowerCase();
+  const role = isBorrower?"BORROWER":isLender?"LENDER":"OBSERVER";
+
+  // ── Load existing repo ─────────────────────────────
+  const[inputId,setInputId]=useState("1");
+  const doLoad=async()=>{
+    const rid=parseInt(inputId);
+    if(isNaN(rid)||rid<1)return;
+    setRepoId(rid);
+    await refresh(rid);
+    ae(`LOADED REPO #${rid}`,"g");
+  };
+
+  // ── Render ─────────────────────────────────────────
+  const colToken = repo ? (repo.collateralToken===ADDR.USTB?"USTB":"USYC") : "USYC";
+
+  return(
+<div style={{height:"100vh",background:"#0e0e0e",display:"flex",flexDirection:"column",overflow:"hidden"}}>
+
+{/* HEADER */}
+<div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"4px 12px",background:"#111",borderBottom:"1px solid #1e1e1e",flexShrink:0}}>
+  <div style={{display:"flex",alignItems:"center",gap:12}}>
+    <span style={{fontWeight:800,fontSize:11,color:"#ccc",letterSpacing:"0.1em"}}>REPO</span>
+    <span className="d" style={{fontSize:9}}>LIVE ON ARBITRUM SEPOLIA</span>
+    <span style={{color:"#222"}}>|</span>
+    <span style={{fontSize:9,fontWeight:700,color:role==="BORROWER"?"#a90":role==="LENDER"?"#58a":"#555"}}>{role}</span>
+  </div>
+  <div style={{display:"flex",alignItems:"center",gap:8}}>
+    <span className="d" style={{fontSize:9}}>USYC</span>
+    <span style={{fontSize:10,fontWeight:700,color:usycPrice>=1?"#4a4":"#c44"}}>${usycPrice.toFixed(4)}</span>
+    <span style={{color:"#222"}}>|</span>
+    {repo&&<><span className="d" style={{fontSize:9}}>REPO #{repoId}</span><span className={stc(repoState)} style={{fontSize:10,fontWeight:700}}>{repoState}</span><span style={{color:"#222"}}>|</span></>}
+    {wallet?(
+      <span style={{fontSize:9,color:"#4a4"}}>{short(wallet)}</span>
+    ):(
+      <Btn onClick={connect} active>CONNECT</Btn>
+    )}
+  </div>
+</div>
+
+{/* HINT */}
+<div style={{padding:"3px 12px",background:"#0a0a0a",borderBottom:"1px solid #1a1a1a",fontSize:9,color:"#58a",letterSpacing:"0.04em"}}>
+  {">> "}{hint}
+</div>
+
+{/* 3-COL */}
+<div style={{flex:1,display:"grid",gridTemplateColumns:"1fr 240px 1fr",overflow:"hidden"}}>
+
+{/* BORROWER */}
+<div style={{borderRight:"1px solid #1a1a1a",display:"flex",flexDirection:"column",overflow:"hidden"}}>
+  <div style={{padding:"4px 10px",background:"#111",borderBottom:"1px solid #1a1a1a",display:"flex",justifyContent:"space-between"}}>
+    <span style={{fontWeight:700,fontSize:10,color:"#a90"}}>BORROWER</span>
+    <span className="d" style={{fontSize:9}}>{short(borrowerAddr)}</span>
+  </div>
+  <div style={{display:"flex",borderBottom:"1px solid #1a1a1a"}}>
+    <div style={{flex:1,padding:"4px 10px",borderRight:"1px solid #1a1a1a"}}>
+      <div style={{fontSize:8,letterSpacing:"0.1em"}} className="d">USDC</div>
+      <div style={{fontSize:13,fontWeight:700,fontVariantNumeric:"tabular-nums"}} className="g">{fmt(bBal.usdc)}</div>
+    </div>
+    <div style={{flex:1,padding:"4px 10px",borderRight:"1px solid #1a1a1a"}}>
+      <div style={{fontSize:8,letterSpacing:"0.1em"}} className="d">USYC</div>
+      <div style={{fontSize:13,fontWeight:700,fontVariantNumeric:"tabular-nums"}} className="b">{fmtK(bBal.usyc)}</div>
+    </div>
+    <div style={{flex:1,padding:"4px 10px"}}>
+      <div style={{fontSize:8,letterSpacing:"0.1em"}} className="d">USTB</div>
+      <div style={{fontSize:13,fontWeight:700,fontVariantNumeric:"tabular-nums"}} className="p">{fmtK(bBal.ustb)}</div>
+    </div>
+  </div>
+  <div style={{padding:"5px 8px",display:"flex",gap:4,borderBottom:"1px solid #1a1a1a",flexWrap:"wrap"}}>
+    <Btn onClick={doPropose} active={!repoId&&isBorrower} disabled={!!repo||!wallet} loading={loading==="propose"}>NEW REPO</Btn>
+    <Btn onClick={doTopUp} active={repoState==="MARGIN_CALLED"&&isBorrower} disabled={repoState!=="MARGIN_CALLED"||!isBorrower} warn={repoState==="MARGIN_CALLED"&&isBorrower} loading={loading==="topup"}>TOP UP</Btn>
+    <Btn onClick={doSubReq} active={repoState==="ACTIVE"&&isBorrower} disabled={repoState!=="ACTIVE"||!isBorrower} loading={loading==="subreq"}>SUBSTITUTE</Btn>
+    <Btn onClick={doSettle} active={repoState==="MATURED"&&isBorrower} disabled={repoState!=="MATURED"||!isBorrower} loading={loading==="settle"}>SETTLE</Btn>
+  </div>
+  {/* Blotter */}
+  <div style={{flex:1,overflow:"auto"}}>
+    {repo?(
+      <table>
+        <thead><tr><th colSpan={4} style={{borderBottom:"1px solid #222"}}>
+          REPO #{repoId} <span className={stc(repoState)}>{repoState}</span>
+        </th></tr></thead>
+        <tbody>
+          <tr><td className="d">NOTIONAL</td><td className="w">{fmt(repo.cashAmount)}</td><td className="d">COL</td><td className="w">{fmtK(repo.collateralAmount)} {colToken}</td></tr>
+          <tr><td className="d">RATE</td><td className="w">{(Number(repo.repoRateBps)/100).toFixed(2)}%</td><td className="d">TERM</td><td className="w">{Number(repo.termSeconds)}s</td></tr>
+          <tr><td className="d">HAIRCUT</td><td className="w">{(Number(repo.haircutBps)/100).toFixed(2)}%</td><td className="d">COL VAL</td><td className={Number(colValue)<Number(reqValue)?"r":"w"}>{fmt(colValue)}</td></tr>
+          {repo.accumulatedYield>0n&&<tr><td className="d">MFG PMT</td><td className="g">-{fmt(repo.accumulatedYield)}</td><td className="d" colSpan={2}>credit@settle</td></tr>}
+          {repoState==="MARGIN_CALLED"&&<tr><td colSpan={4} className="r">** MARGIN CALL - TOP UP REQUIRED **</td></tr>}
+          {repoState==="MATURED"&&<tr><td colSpan={4} className="y">** MATURED - SETTLE AVAILABLE **</td></tr>}
+          {settlement&&repoState==="SETTLED"&&(
+            <>
+              <tr><td colSpan={4} style={{borderTop:"1px double #333",color:"#555",fontWeight:700,fontSize:9}}>SETTLEMENT</td></tr>
+              <tr><td className="d">INTEREST</td><td className="w">{fmt(settlement.int)}</td><td className="d">MFG CREDIT</td><td className="g">-{fmt(settlement.mfg)}</td></tr>
+              <tr><td className="d" style={{fontWeight:700}}>NET PAID</td><td className="y" style={{fontWeight:700}}>{fmt(settlement.net)}</td><td/><td/></tr>
+            </>
+          )}
+        </tbody>
+      </table>
+    ):(
+      <div style={{padding:30,textAlign:"center",color:"#1a1a1a"}}>NO POSITIONS</div>
+    )}
+  </div>
+</div>
+
+{/* PROTOCOL */}
+<div style={{borderRight:"1px solid #1a1a1a",display:"flex",flexDirection:"column",overflow:"hidden",background:"#0c0c0c"}}>
+  <div style={{padding:"4px 8px",background:"#111",borderBottom:"1px solid #1a1a1a",textAlign:"center"}}>
+    <span style={{fontWeight:700,fontSize:9,color:"#555",letterSpacing:"0.15em"}}>PROTOCOL</span>
+  </div>
+  <div style={{padding:8,borderBottom:"1px solid #1a1a1a"}}>
+    <div style={{fontSize:8,letterSpacing:"0.1em",marginBottom:4}} className="d">LOAD REPO</div>
+    <div style={{display:"flex",gap:4,marginBottom:8}}>
+      <input value={inputId} onChange={e=>setInputId(e.target.value)} style={{background:"#1a1a1a",border:"1px solid #2a2a2a",color:"#ccc",padding:"2px 6px",fontSize:10,width:40,fontFamily:"inherit"}}/>
+      <Btn onClick={doLoad} disabled={!wallet}>LOAD</Btn>
+    </div>
+    <div style={{fontSize:8,letterSpacing:"0.1em",marginBottom:4}} className="d">MARKET SIM</div>
+    <div style={{marginBottom:6}}>
+      <Btn onClick={doYield} disabled={repoState!=="ACTIVE"||!wallet} loading={loading==="yield"} style={{width:"100%"}}>TRIGGER YIELD +520</Btn>
+    </div>
+    <div style={{marginBottom:6}}>
+      <div style={{display:"flex",justifyContent:"space-between",fontSize:8,marginBottom:2}} className="d">
+        <span>SET USYC PX</span>
+      </div>
+      <div style={{display:"flex",gap:4}}>
+        <Btn onClick={()=>doSetPrice(0.96)} disabled={!wallet} loading={loading==="price"} style={{flex:1}}>$0.96</Btn>
+        <Btn onClick={()=>doSetPrice(1.00)} disabled={!wallet} loading={loading==="price"} style={{flex:1}}>$1.00</Btn>
+      </div>
+    </div>
+    <div style={{marginBottom:6}}>
+      <Btn onClick={doCheckMargin} disabled={repoState!=="ACTIVE"||!wallet} loading={loading==="margin"} style={{width:"100%"}}>CHECK MARGIN</Btn>
+    </div>
+    <div style={{marginBottom:6}}>
+      <Btn onClick={doCheckMaturity} disabled={repoState!=="ACTIVE"||!wallet} loading={loading==="maturity"} style={{width:"100%"}}>CHECK MATURITY</Btn>
+    </div>
+    <div>
+      <Btn onClick={doLiquidate} disabled={repoState!=="MARGIN_CALLED"||!wallet} warn={repoState==="MARGIN_CALLED"} loading={loading==="liquidate"} style={{width:"100%"}}>LIQUIDATE</Btn>
+    </div>
+  </div>
+  {/* Info */}
+  {repo&&(
+    <div style={{padding:"6px 8px",borderBottom:"1px solid #1a1a1a"}}>
+      <div style={{fontSize:8,letterSpacing:"0.1em",marginBottom:3}} className="d">ON-CHAIN</div>
+      <table style={{fontSize:8.5}}>
+        <tbody>
+          <tr><td className="d">COL VALUE</td><td className={Number(colValue)<Number(reqValue)?"r":"g"}>{fmt(colValue)}</td></tr>
+          <tr><td className="d">REQUIRED</td><td className="w">{fmt(reqValue)}</td></tr>
+          <tr><td className="d">RT HOLDER</td><td className="p">{short(rtHolder)}</td></tr>
+          <tr><td className="d">MFG PMT</td><td className="y">{fmt(repo.accumulatedYield)}</td></tr>
+        </tbody>
+      </table>
+    </div>
+  )}
+  {/* Event feed */}
+  <div style={{flex:1,overflow:"auto",padding:"3px 6px"}}>
+    <div style={{fontSize:8,letterSpacing:"0.1em",marginBottom:2}} className="d">EVENTS</div>
+    {ef.map(e=>e.t?<Log key={e.id} time={e.ts} text={e.t} c={e.c}/>:null)}
+    {ef.length===0&&<div style={{color:"#1a1a1a",fontSize:9,padding:15,textAlign:"center"}}>IDLE</div>}
+  </div>
+</div>
+
+{/* LENDER */}
+<div style={{display:"flex",flexDirection:"column",overflow:"hidden"}}>
+  <div style={{padding:"4px 10px",background:"#111",borderBottom:"1px solid #1a1a1a",display:"flex",justifyContent:"space-between"}}>
+    <span style={{fontWeight:700,fontSize:10,color:"#58a"}}>LENDER</span>
+    <span className="d" style={{fontSize:9}}>{short(lenderAddr)}</span>
+  </div>
+  <div style={{display:"flex",borderBottom:"1px solid #1a1a1a"}}>
+    <div style={{flex:1,padding:"4px 10px",borderRight:"1px solid #1a1a1a"}}>
+      <div style={{fontSize:8,letterSpacing:"0.1em"}} className="d">USDC</div>
+      <div style={{fontSize:13,fontWeight:700,fontVariantNumeric:"tabular-nums"}} className="g">{fmt(lBal.usdc)}</div>
+    </div>
+    <div style={{flex:1,padding:"4px 10px",borderRight:"1px solid #1a1a1a"}}>
+      <div style={{fontSize:8,letterSpacing:"0.1em"}} className="d">USYC</div>
+      <div style={{fontSize:13,fontWeight:700,fontVariantNumeric:"tabular-nums"}} className="b">{fmtK(lBal.usyc)}</div>
+    </div>
+    <div style={{flex:1,padding:"4px 10px"}}>
+      <div style={{fontSize:8,letterSpacing:"0.1em"}} className="d">USTB</div>
+      <div style={{fontSize:13,fontWeight:700,fontVariantNumeric:"tabular-nums"}} className="p">{fmtK(lBal.ustb)}</div>
+    </div>
+  </div>
+  <div style={{padding:"5px 8px",display:"flex",gap:4,borderBottom:"1px solid #1a1a1a",flexWrap:"wrap"}}>
+    <Btn onClick={doAccept} active={repoState==="PROPOSED"&&isLender} disabled={repoState!=="PROPOSED"||!wallet||isBorrower} loading={loading==="accept"}>ACCEPT #{repoId||"?"}</Btn>
+    <Btn onClick={doSubApprove} active={repoState==="ACTIVE"&&isLender} disabled={repoState!=="ACTIVE"||!isLender} loading={loading==="subappr"}>APPROVE SUB</Btn>
+    <Btn disabled>REJECT</Btn>
+  </div>
+  {/* Lender blotter */}
+  <div style={{flex:1,overflow:"auto"}}>
+    {repo&&repoState!=="PROPOSED"?(
+      <table>
+        <thead><tr><th colSpan={4} style={{borderBottom:"1px solid #222"}}>
+          REPO #{repoId} <span className={stc(repoState)}>{repoState}</span>
+        </th></tr></thead>
+        <tbody>
+          <tr><td className="d">LENT</td><td className="y">{fmt(repo.cashAmount)}</td><td className="d">COL RECV</td><td className="w">{fmtK(repo.collateralAmount)} {colToken}</td></tr>
+          <tr><td className="d">RATE</td><td className="w">{(Number(repo.repoRateBps)/100).toFixed(2)}%</td><td className="d">HAIRCUT</td><td className="w">{(Number(repo.haircutBps)/100).toFixed(2)}%</td></tr>
+          {repo.accumulatedYield>0n&&<tr><td className="d">YIELD</td><td className="y">+{fmt(repo.accumulatedYield)}</td><td className="d" colSpan={2}>mfg_pmt offset</td></tr>}
+          {(repoState==="ACTIVE"||repoState==="MARGIN_CALLED")&&rtHolder&&<tr><td className="d">RT#{repoId}</td><td className="p">{short(rtHolder)}</td><td className="d" colSpan={2}>position</td></tr>}
+          {settlement&&repoState==="SETTLED"&&<tr><td className="d">RECV</td><td className="g" style={{fontWeight:700}}>{fmt(settlement.net)}</td><td className="d" colSpan={2}>settled</td></tr>}
+        </tbody>
+      </table>
+    ):repo&&repoState==="PROPOSED"?(
+      <table>
+        <thead><tr><th colSpan={4} style={{borderBottom:"1px solid #222"}}>INCOMING #{repoId} <span className="y">PROPOSED</span></th></tr></thead>
+        <tbody>
+          <tr><td className="d">FROM</td><td className="w">{short(borrowerAddr)}</td><td className="d">CASH</td><td className="w">{fmt(repo.cashAmount)}</td></tr>
+          <tr><td className="d">COL</td><td className="w">{fmtK(repo.collateralAmount)} USYC</td><td className="d">RATE</td><td className="w">{(Number(repo.repoRateBps)/100).toFixed(2)}%</td></tr>
+        </tbody>
+      </table>
+    ):(
+      <div style={{padding:30,textAlign:"center",color:"#1a1a1a"}}>NO INCOMING</div>
+    )}
+  </div>
+</div>
+
+</div>
+</div>
+  );
+}
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
