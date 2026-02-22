@@ -26,12 +26,13 @@ contract Deploy is Script {
         servicer.setYieldDistributor(address(yieldDist));
         servicer.setPriceFeed(address(priceFeed));
 
-        priceFeed.setPrice(address(usyc), 1e6);
-        priceFeed.setPrice(address(ustb), 1e6);
+        // Set initial prices
+        priceFeed.setPrice(address(usyc), 1e6); // $1.00
+        priceFeed.setPrice(address(ustb), 1e6); // $1.00
 
         vm.stopBroadcast();
 
-        console2.log("=== DEPLOYED (Day 3) ===");
+        console2.log("=== DEPLOYED ===");
         console2.log("RepoServicer:  ", address(servicer));
         console2.log("RepoToken:     ", address(repoToken));
         console2.log("MockUSDC:      ", address(usdc));

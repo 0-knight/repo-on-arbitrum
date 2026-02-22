@@ -3,7 +3,6 @@ pragma solidity ^0.8.24;
 
 import {IERC20} from "lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "lib/openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol";
-import {IERC721} from "lib/openzeppelin-contracts/contracts/token/ERC721/IERC721.sol";
 import {RepoToken} from "./RepoToken.sol";
 import {RepoTypes} from "./RepoTypes.sol";
 
@@ -12,10 +11,9 @@ interface IPriceFeed {
     function getValue(address token, uint256 amount) external view returns (uint256);
 }
 
-/// @title RepoServicer - P2P Repo Lifecycle Engine
+/// @title RepoServicer — P2P Repo Lifecycle Engine
 /// @notice Day 1: propose, accept, yield, maturity, settle
 ///         Day 2: margin calls, collateral substitution, fail penalty
-///         Day 3: rehypothecation (RT as NFT collateral), cascade risk
 contract RepoServicer {
     using SafeERC20 for IERC20;
 
@@ -37,17 +35,6 @@ contract RepoServicer {
     mapping(uint256 => RepoTypes.Repo) public repos;
     mapping(uint256 => RepoTypes.SubstitutionRequest) public substitutionRequests;
 
-    // Rehypo tracking: repoTokenId => repoId that uses it as collateral
-    // e.g. RT#1 is collateral for Repo#2 => rehypoMap[1] = 2
-    mapping(uint256 => uint256) public rehypoMap;
-
-    // ═══════════════════════════════════════════════════
-    // EVENTS (Day 3)
-    // ═══════════════════════════════════════════════════
-
-    event RehypoProposed(uint256 indexed repoId, uint256 indexed collateralRepoTokenId, uint256 cashAmount);
-    event CascadeTriggered(uint256 indexed settledRepoId, uint256 indexed cascadedRepoId);
-
     // ═══════════════════════════════════════════════════
     // CONSTRUCTOR
     // ═══════════════════════════════════════════════════
@@ -66,7 +53,7 @@ contract RepoServicer {
     }
 
     // ═══════════════════════════════════════════════════
-    // LIFECYCLE - ERC20 COLLATERAL (Day 1)
+    // LIFECYCLE (Day 1)
     // ═══════════════════════════════════════════════════
 
     function proposeRepo(
@@ -121,14 +108,7 @@ contract RepoServicer {
         repo.startTime = block.timestamp;
         repo.maturityTime = block.timestamp + repo.termSeconds;
 
-        // Title transfer based on collateral type
-        if (repo.collateralType == RepoTypes.CollateralType.ERC20) {
-            IERC20(repo.collateralToken).safeTransferFrom(repo.borrower, msg.sender, repo.collateralAmount);
-        } else {
-            // ERC721 (RepoToken as collateral for rehypo)
-            IERC721(repo.collateralToken).transferFrom(repo.borrower, msg.sender, repo.collateralTokenId);
-        }
-
+        IERC20(repo.collateralToken).safeTransferFrom(repo.borrower, msg.sender, repo.collateralAmount);
         IERC20(repo.cashToken).safeTransferFrom(msg.sender, repo.borrower, repo.cashAmount);
         repoToken.mint(msg.sender, repoId);
 
@@ -144,12 +124,6 @@ contract RepoServicer {
             revert RepoTypes.NotBorrower(repoId, msg.sender);
         }
         repo.state = RepoTypes.RepoState.Cancelled;
-
-        // Clear rehypo mapping if this was a rehypo repo
-        if (repo.collateralType == RepoTypes.CollateralType.ERC721) {
-            delete rehypoMap[repo.collateralTokenId];
-        }
-
         emit RepoTypes.RepoCancelled(repoId);
     }
 
@@ -165,18 +139,20 @@ contract RepoServicer {
         emit RepoTypes.RepoMatured(repoId);
     }
 
-    /// @notice Demo only: force maturity regardless of time elapsed
+    /// @notice Demo only: force maturity regardless of time elapsed.
+    ///         Sets maturityTime so that full term interest is calculated at settlement.
     function forceMaturity(uint256 repoId) external {
         RepoTypes.Repo storage repo = repos[repoId];
         if (repo.state != RepoTypes.RepoState.Active) {
             revert RepoTypes.InvalidState(repoId, repo.state, RepoTypes.RepoState.Active);
         }
+        // Set maturityTime as if full term has elapsed
         repo.maturityTime = repo.startTime + repo.termSeconds;
         repo.state = RepoTypes.RepoState.Matured;
         emit RepoTypes.RepoMatured(repoId);
     }
 
-    /// @notice Settle a matured repo with fail-to-return penalty + cascade detection
+    /// @notice Settle a matured repo with fail-to-return penalty support
     function settleRepo(uint256 repoId) external {
         RepoTypes.Repo storage repo = repos[repoId];
         if (repo.state != RepoTypes.RepoState.Matured) {
@@ -189,35 +165,7 @@ contract RepoServicer {
         address currentLender = repoToken.ownerOf(repoId);
         (uint256 interest, uint256 mfgCredit, uint256 netPayment) = calculateSettlement(repoId);
 
-        if (repo.collateralType == RepoTypes.CollateralType.ERC20) {
-            _settleERC20(repo, currentLender, netPayment);
-        } else {
-            _settleERC721(repo, currentLender, netPayment);
-        }
-
-        // Burn RT for this repo
-        repoToken.burn(repoId);
-        repo.state = RepoTypes.RepoState.Settled;
-
-        emit RepoTypes.RepoSettled(repoId, netPayment, repo.collateralAmount);
-
-        // ── Cascade detection ──
-        // If this RT was used as collateral in another repo, trigger margin call
-        uint256 cascadeRepoId = rehypoMap[repoId];
-        if (cascadeRepoId != 0) {
-            RepoTypes.Repo storage cascadeRepo = repos[cascadeRepoId];
-            if (cascadeRepo.state == RepoTypes.RepoState.Active) {
-                // RT burned = collateral destroyed -> immediate margin call
-                cascadeRepo.state = RepoTypes.RepoState.MarginCalled;
-                cascadeRepo.marginCallDeadline = block.timestamp + GRACE_PERIOD;
-                emit CascadeTriggered(repoId, cascadeRepoId);
-                emit RepoTypes.MarginCallTriggered(cascadeRepoId, 0, cascadeRepo.cashAmount, cascadeRepo.marginCallDeadline);
-            }
-            delete rehypoMap[repoId];
-        }
-    }
-
-    function _settleERC20(RepoTypes.Repo storage repo, address currentLender, uint256 netPayment) internal {
+        // Check lender's collateral balance for fail-to-return
         uint256 lenderColBal = IERC20(repo.collateralToken).balanceOf(currentLender);
         uint256 returnable = lenderColBal < repo.collateralAmount ? lenderColBal : repo.collateralAmount;
         uint256 shortfall = repo.collateralAmount - returnable;
@@ -228,7 +176,9 @@ contract RepoServicer {
             penalty = (shortfallValue * (10000 + repo.failPenaltyBps)) / 10000;
         }
 
+        // Execute settlement
         if (penalty == 0) {
+            // Normal settlement: borrower pays net, lender returns all collateral
             if (netPayment > 0) {
                 IERC20(repo.cashToken).safeTransferFrom(repo.borrower, currentLender, netPayment);
             }
@@ -236,116 +186,30 @@ contract RepoServicer {
                 IERC20(repo.collateralToken).safeTransferFrom(currentLender, repo.borrower, returnable);
             }
         } else {
+            // Fail-to-return: offset penalty against net payment
             if (netPayment > penalty) {
                 IERC20(repo.cashToken).safeTransferFrom(repo.borrower, currentLender, netPayment - penalty);
             } else if (penalty > netPayment) {
                 IERC20(repo.cashToken).safeTransferFrom(currentLender, repo.borrower, penalty - netPayment);
             }
+            // Return whatever collateral lender has
             if (returnable > 0) {
                 IERC20(repo.collateralToken).safeTransferFrom(currentLender, repo.borrower, returnable);
             }
-            emit RepoTypes.FailPenaltyCharged(repo.id, currentLender, penalty);
-        }
-    }
-
-    function _settleERC721(RepoTypes.Repo storage repo, address currentLender, uint256 netPayment) internal {
-        // For ERC721 collateral (rehypo): return the RT to borrower
-        // Check if lender still holds the RT
-        address rtOwner = address(0);
-        try repoToken.ownerOf(repo.collateralTokenId) returns (address owner) {
-            rtOwner = owner;
-        } catch {}
-
-        if (rtOwner == currentLender) {
-            // Lender still has the RT, return it
-            IERC721(repo.collateralToken).transferFrom(currentLender, repo.borrower, repo.collateralTokenId);
-            if (netPayment > 0) {
-                IERC20(repo.cashToken).safeTransferFrom(repo.borrower, currentLender, netPayment);
-            }
-        } else {
-            // RT was burned (underlying repo settled) or lender lost it
-            // Apply fail penalty
-            uint256 rtValue = 0;
-            try this.calculateRepoTokenValue(repo.collateralTokenId) returns (uint256 v) {
-                rtValue = v;
-            } catch {}
-
-            uint256 penalty = (rtValue * (10000 + repo.failPenaltyBps)) / 10000;
-            if (netPayment > penalty) {
-                IERC20(repo.cashToken).safeTransferFrom(repo.borrower, currentLender, netPayment - penalty);
-            } else if (penalty > netPayment) {
-                IERC20(repo.cashToken).safeTransferFrom(currentLender, repo.borrower, penalty - netPayment);
-            }
-            emit RepoTypes.FailPenaltyCharged(repo.id, currentLender, penalty);
-        }
-    }
-
-    // ═══════════════════════════════════════════════════
-    // REHYPOTHECATION (Day 3)
-    // ═══════════════════════════════════════════════════
-
-    /// @notice Propose a repo using a RepoToken (RT) as collateral
-    /// @param cashToken The cash token to borrow (USDC)
-    /// @param cashAmount Amount to borrow
-    /// @param rtTokenId The RepoToken ID to use as collateral
-    /// @param haircutBps Haircut in basis points
-    /// @param repoRateBps Rate in basis points
-    /// @param termSeconds Term length
-    function proposeRepoWithRT(
-        address cashToken,
-        uint256 cashAmount,
-        uint256 rtTokenId,
-        uint256 haircutBps,
-        uint256 repoRateBps,
-        uint256 termSeconds
-    ) external returns (uint256 repoId) {
-        if (cashAmount == 0) revert RepoTypes.ZeroAmount();
-        if (haircutBps == 0 || haircutBps > 5000) revert RepoTypes.InvalidHaircut();
-        if (repoRateBps == 0 || repoRateBps > 10000) revert RepoTypes.InvalidRate();
-        if (termSeconds == 0 || termSeconds > 365 days) revert RepoTypes.InvalidTerm();
-
-        // Verify caller owns the RT
-        require(repoToken.ownerOf(rtTokenId) == msg.sender, "not RT owner");
-
-        // Verify RT not already used as collateral
-        require(rehypoMap[rtTokenId] == 0, "RT already rehyped");
-
-        // Validate RT value against haircut
-        uint256 rtValue = this.calculateRepoTokenValue(rtTokenId);
-        uint256 requiredValue = (cashAmount * (10000 + haircutBps)) / 10000;
-        if (rtValue < requiredValue) {
-            revert RepoTypes.InsufficientCollateral(rtValue, requiredValue);
+            emit RepoTypes.FailPenaltyCharged(repoId, currentLender, penalty);
         }
 
-        repoId = nextRepoId++;
+        repoToken.burn(repoId);
+        repo.state = RepoTypes.RepoState.Settled;
 
-        RepoTypes.Repo storage repo = repos[repoId];
-        repo.id = repoId;
-        repo.borrower = msg.sender;
-        repo.cashToken = cashToken;
-        repo.cashAmount = cashAmount;
-        repo.collateralType = RepoTypes.CollateralType.ERC721;
-        repo.collateralToken = address(repoToken);
-        repo.collateralAmount = 1;
-        repo.collateralTokenId = rtTokenId;
-        repo.haircutBps = haircutBps;
-        repo.repoRateBps = repoRateBps;
-        repo.termSeconds = termSeconds;
-        repo.failPenaltyBps = 300;
-        repo.proposedAt = block.timestamp;
-        repo.state = RepoTypes.RepoState.Proposed;
-
-        // Track rehypo chain
-        rehypoMap[rtTokenId] = repoId;
-
-        emit RehypoProposed(repoId, rtTokenId, cashAmount);
-        emit RepoTypes.RepoProposed(repoId, msg.sender, cashAmount, 1);
+        emit RepoTypes.RepoSettled(repoId, netPayment, returnable);
     }
 
     // ═══════════════════════════════════════════════════
     // MARGIN (Day 2)
     // ═══════════════════════════════════════════════════
 
+    /// @notice Check if collateral value breaches haircut requirement
     function checkMargin(uint256 repoId) external {
         RepoTypes.Repo storage repo = repos[repoId];
         if (repo.state != RepoTypes.RepoState.Active) {
@@ -353,15 +217,9 @@ contract RepoServicer {
         }
         require(address(priceFeed) != address(0), "price feed not set");
 
-        uint256 colValue;
-        if (repo.collateralType == RepoTypes.CollateralType.ERC20) {
-            colValue = priceFeed.getValue(repo.collateralToken, repo.collateralAmount);
-        } else {
-            // ERC721: use RT value
-            colValue = this.calculateRepoTokenValue(repo.collateralTokenId);
-        }
-
+        uint256 colValue = priceFeed.getValue(repo.collateralToken, repo.collateralAmount);
         uint256 requiredValue = (repo.cashAmount * (10000 + repo.haircutBps)) / 10000;
+
         require(colValue < requiredValue, "margin is sufficient");
 
         repo.state = RepoTypes.RepoState.MarginCalled;
@@ -370,6 +228,7 @@ contract RepoServicer {
         emit RepoTypes.MarginCallTriggered(repoId, colValue, requiredValue, repo.marginCallDeadline);
     }
 
+    /// @notice Borrower adds collateral to restore margin
     function topUpCollateral(uint256 repoId, uint256 additionalAmount) external {
         RepoTypes.Repo storage repo = repos[repoId];
         if (repo.state != RepoTypes.RepoState.MarginCalled) {
@@ -379,12 +238,13 @@ contract RepoServicer {
             revert RepoTypes.NotBorrower(repoId, msg.sender);
         }
         if (additionalAmount == 0) revert RepoTypes.ZeroAmount();
-        require(repo.collateralType == RepoTypes.CollateralType.ERC20, "ERC20 only");
 
         address currentLender = repoToken.ownerOf(repoId);
+
         IERC20(repo.collateralToken).safeTransferFrom(msg.sender, currentLender, additionalAmount);
         repo.collateralAmount += additionalAmount;
 
+        // Check if margin restored
         if (address(priceFeed) != address(0)) {
             uint256 newColValue = priceFeed.getValue(repo.collateralToken, repo.collateralAmount);
             uint256 requiredValue = (repo.cashAmount * (10000 + repo.haircutBps)) / 10000;
@@ -397,6 +257,7 @@ contract RepoServicer {
         emit RepoTypes.MarginRestored(repoId, additionalAmount);
     }
 
+    /// @notice Liquidate after margin call grace period expires
     function liquidate(uint256 repoId) external {
         RepoTypes.Repo storage repo = repos[repoId];
         if (repo.state != RepoTypes.RepoState.MarginCalled) {
@@ -412,23 +273,11 @@ contract RepoServicer {
         emit RepoTypes.RepoDefaulted(repoId, 0);
     }
 
-    /// @notice Demo: force liquidate without waiting for grace period
-    function forceLiquidate(uint256 repoId) external {
-        RepoTypes.Repo storage repo = repos[repoId];
-        if (repo.state != RepoTypes.RepoState.MarginCalled) {
-            revert RepoTypes.InvalidState(repoId, repo.state, RepoTypes.RepoState.MarginCalled);
-        }
-
-        repoToken.burn(repoId);
-        repo.state = RepoTypes.RepoState.Defaulted;
-
-        emit RepoTypes.RepoDefaulted(repoId, 0);
-    }
-
     // ═══════════════════════════════════════════════════
     // COLLATERAL SUBSTITUTION (Day 2)
     // ═══════════════════════════════════════════════════
 
+    /// @notice Borrower requests to swap collateral mid-repo
     function requestSubstitution(
         uint256 repoId,
         address newCollateralToken,
@@ -444,6 +293,7 @@ contract RepoServicer {
         require(repo.collateralType == RepoTypes.CollateralType.ERC20, "ERC20 only");
         if (newCollateralAmount == 0) revert RepoTypes.ZeroAmount();
 
+        // Validate new collateral meets haircut
         if (address(priceFeed) != address(0)) {
             uint256 newColValue = priceFeed.getValue(newCollateralToken, newCollateralAmount);
             uint256 requiredValue = (repo.cashAmount * (10000 + repo.haircutBps)) / 10000;
@@ -461,6 +311,7 @@ contract RepoServicer {
         emit RepoTypes.SubstitutionRequested(repoId, newCollateralToken, newCollateralAmount);
     }
 
+    /// @notice Lender approves substitution — atomic swap
     function approveSubstitution(uint256 repoId) external {
         RepoTypes.Repo storage repo = repos[repoId];
         if (repo.state != RepoTypes.RepoState.Active) {
@@ -476,6 +327,7 @@ contract RepoServicer {
         address oldToken = repo.collateralToken;
         uint256 oldAmount = repo.collateralAmount;
 
+        // Atomic swap
         IERC20(oldToken).safeTransferFrom(currentLender, repo.borrower, oldAmount);
         IERC20(req.newCollateralToken).safeTransferFrom(repo.borrower, currentLender, req.newCollateralAmount);
 
@@ -519,8 +371,8 @@ contract RepoServicer {
         netPayment = mfgCredit >= gross ? 0 : gross - mfgCredit;
     }
 
-    function calculateRepoTokenValue(uint256 rtTokenId) external view returns (uint256) {
-        RepoTypes.Repo storage repo = repos[rtTokenId];
+    function calculateRepoTokenValue(uint256 repoId) external view returns (uint256) {
+        RepoTypes.Repo storage repo = repos[repoId];
         if (repo.state != RepoTypes.RepoState.Active && repo.state != RepoTypes.RepoState.Matured) {
             return 0;
         }
@@ -535,9 +387,6 @@ contract RepoServicer {
 
     function getCollateralValue(uint256 repoId) external view returns (uint256) {
         RepoTypes.Repo storage repo = repos[repoId];
-        if (repo.collateralType == RepoTypes.CollateralType.ERC721) {
-            return this.calculateRepoTokenValue(repo.collateralTokenId);
-        }
         if (address(priceFeed) == address(0)) return 0;
         return priceFeed.getValue(repo.collateralToken, repo.collateralAmount);
     }
@@ -557,10 +406,5 @@ contract RepoServicer {
 
     function getSubstitutionRequest(uint256 repoId) external view returns (RepoTypes.SubstitutionRequest memory) {
         return substitutionRequests[repoId];
-    }
-
-    /// @notice Get the repo ID that uses a given RT as collateral (0 if none)
-    function getRehypoRepo(uint256 rtTokenId) external view returns (uint256) {
-        return rehypoMap[rtTokenId];
     }
 }
