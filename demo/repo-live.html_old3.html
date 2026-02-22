@@ -34,13 +34,13 @@ const{useState,useCallback,useEffect}=React;
 const{ethers}=window;
 
 const ADDR = {
-  SERVICER:   "0xCA38282fbfb462884f4c0Bb959a23f4C077c68FA",
-  REPO_TOKEN: "0xcB666Fb883F9500a5E2091a8f1D6FF1a179A0fD7",
-  USDC:       "0x9b4c8ed7d25fB13e647029F629767E02B76F5CE4",
-  USYC:       "0x13109e20cA9516332c04c6b0dcD859FA0C7b6C92",
-  USTB:       "0xB3B82Bd054De2286f00010625826dfB18e456B30",
-  PRICE_FEED: "0x5153C86E7A77585F03432E2b68763Bb84535D73e",
-  YIELD_DIST: "0xC3013eE38246785BD21a40A2ccde99C4A234aDf3",
+  SERVICER:   "0x46AEeAB1C393485FfFcb1B32c91A4396E1F7c94F",
+  REPO_TOKEN: "0x213268B2562738167F0EC947b7e1488732030004",
+  USDC:       "0x762427e83F146E755433b9185dD15810963D4beC",
+  USYC:       "0x59C0B081373F7caA83b82a1267b7F66b372002a5",
+  USTB:       "0x8F2fd22d2568B1d637892F7b6F8d32313d975491",
+  PRICE_FEED: "0xb3eEc424E508299C8DE140b94C990878b36EAbaD",
+  YIELD_DIST: "0x094dC49cE0b36DFCA934DF3Bf20E5e8F6fd4c53d",
   BORROWER:   "0x0D781453255A7Dbdf7F431CbCB956733173898b5",
   LENDER:     "0x3FB2d86389bea9f673F6Fc9d9FD4AE549A2f2eB1",
   CHARLIE:    "0x6F217c0bA23D54330E38A9Ee917455659e4d597d",
@@ -120,8 +120,6 @@ function App(){
   const[ef,setEf]=useState([]);
   const[hint,setHint]=useState("Connect wallet to begin");
   const[act,setAct]=useState(1);
-  const[act2phase,setAct2phase]=useState(1); // 1=base repo setup, 2=rehypo
-  const[scenario,setScenario]=useState(""); // "A"=normal, "B"=cascade
 
   // Act 1 state
   const[repo1Id,setRepo1Id]=useState(0);
@@ -247,11 +245,11 @@ function App(){
   // ═══ ACT 1 ACTIONS ═══
   const doPropose=()=>wrap("propose",async()=>{
     await ensureApproval(ADDR.USYC,105000n*D6);
-    const s=getS();
-    const rid=Number(await s.nextRepoId());
-    ae("PROPOSE: 105K USYC / 100K USDC / 4.50% / 30D ...","y");
+    const s=getS();ae("PROPOSE: 105K USYC / 100K USDC / 4.50% / 30D ...","y");
     const tx=await s.proposeRepo(ADDR.USDC,100000n*D6,ADDR.USYC,105000n*D6,500,450,2592000,await G());
-    await tx.wait();
+    const rc=await tx.wait();
+    const ev=rc.logs.map(l=>{try{return s.interface.parseLog(l)}catch(e){return null}}).find(e=>e&&e.name==="RepoProposed");
+    const rid=ev?Number(ev.args.repoId):1;
     setRepo1Id(rid);ae(`PROPOSED #${rid} tx=${short(tx.hash)}`,"g");
     setHint("Switch to LENDER >> ACCEPT #"+rid);
   });
@@ -320,25 +318,21 @@ function App(){
 
   // ═══ ACT 2 ACTIONS ═══
   const doStartAct2=async()=>{
-    setAct(2);setAct2phase(1);setScenario("");
-    setRepo1(null);setRepo1Id(0);setRepo1State("");
-    setRepo2(null);setRepo2Id(0);setRepo2State("");
-    setSettlement1(null);
+    setAct(2);
+    // Need a new Repo #X for Act 2 base
     ae("=== ACT 2: REHYPOTHECATION ===","p");
-    setHint("BORROWER >> NEW REPO (base for rehypo)");
+    ae("Lender will propose new Repo, then rehypo RT as collateral","d");
+    setHint("BORROWER >> NEW REPO (for Act 2 base)");
   };
 
   const doPropose2=()=>wrap("propose2",async()=>{
     await ensureApproval(ADDR.USYC,105000n*D6);
-    const s=getS();
-    const rid=Number(await s.nextRepoId());
-    ae("PROPOSE: 105K USYC / 100K USDC / 4.50% / 30D ...","y");
+    const s=getS();ae("PROPOSE: 105K USYC / 100K USDC / 4.50% / 30D ...","y");
     const tx=await s.proposeRepo(ADDR.USDC,100000n*D6,ADDR.USYC,105000n*D6,500,450,2592000,await G());
-    await tx.wait();
-    setRepo1Id(rid);
-    const r=await s.getRepo(rid);
-    setRepo1(r);setRepo1State(STATES[Number(r.state)]||"UNKNOWN");
-    ae(`PROPOSED #${rid} tx=${short(tx.hash)}`,"g");
+    const rc=await tx.wait();
+    const ev=rc.logs.map(l=>{try{return s.interface.parseLog(l)}catch(e){return null}}).find(e=>e&&e.name==="RepoProposed");
+    const rid=ev?Number(ev.args.repoId):repo1Id+1;
+    setRepo1Id(rid);ae(`PROPOSED #${rid} tx=${short(tx.hash)}`,"g");
     setHint("Switch to LENDER >> ACCEPT #"+rid);
   });
 
@@ -347,17 +341,17 @@ function App(){
     const s=getS();ae(`ACCEPT #${repo1Id} ...`,"b");
     const tx=await s.acceptRepo(repo1Id,await G());await tx.wait();
     ae(`ACCEPTED #${repo1Id} tx=${short(tx.hash)}`,"g");
-    setAct2phase(2);
     setHint("Switch to LENDER >> REHYPO (use RT as collateral)");
   });
 
   const doRehypo=()=>wrap("rehypo",async()=>{
     const s=getS();
-    const rid2=Number(await s.nextRepoId());
     const rtVal=await s.calculateRepoTokenValue(repo1Id);
     ae(`REHYPO: RT#${repo1Id} (val=${fmt(rtVal)}) as collateral for 90K USDC ...`,"p");
     const tx=await s.proposeRepoWithRT(ADDR.USDC,90000n*D6,repo1Id,1000,480,604800,await G());
-    await tx.wait();
+    const rc=await tx.wait();
+    const ev=rc.logs.map(l=>{try{return s.interface.parseLog(l)}catch(e){return null}}).find(e=>e&&e.name==="RepoProposed");
+    const rid2=ev?Number(ev.args.repoId):repo1Id+1;
     setRepo2Id(rid2);ae(`REHYPO #${rid2} PROPOSED (col=RT#${repo1Id}) tx=${short(tx.hash)}`,"g");
     ae(`Capital efficiency: 105K USYC -> 100K + 90K = 190K USDC (1.81x)`,"y");
     setHint("Switch to CHARLIE >> ACCEPT REHYPO #"+rid2);
@@ -391,38 +385,7 @@ function App(){
     const s=getS();ae(`FORCE LIQUIDATE #${repo2Id} ...`,"r");
     const tx=await s.forceLiquidate(repo2Id,await G());await tx.wait();
     ae(`REPO #${repo2Id} DEFAULTED tx=${short(tx.hash)}`,"r");
-    ae("=== SCENARIO B COMPLETE ===","p");setHint("CASCADE DEMO COMPLETE");
-  });
-
-  // Scenario A: settle rehypo first (normal unwind)
-  const doMatureRehypo=()=>wrap("matureRehypo",async()=>{
-    const s=getS();ae(`ADVANCE TO MATURITY (rehypo) #${repo2Id} ...`,"y");
-    const tx=await s.forceMaturity(repo2Id,await G());await tx.wait();
-    ae(`REHYPO #${repo2Id} MATURED tx=${short(tx.hash)}`,"g");
-    setHint("Switch to LENDER >> SETTLE REHYPO #"+repo2Id);
-  });
-
-  const doSettleRehypo=()=>wrap("settleRehypo",async()=>{
-    await ensureApproval(ADDR.USDC,200000n*D6);
-    const s=getS();ae(`SETTLE REHYPO #${repo2Id} ...`,"g");
-    const tx=await s.settleRepo(repo2Id,await G());await tx.wait();
-    ae(`REHYPO #${repo2Id} SETTLED - RT#${repo1Id} returned to Lender`,"g");
-    setHint("PROTOCOL >> MATURE BASE #"+repo1Id);
-  });
-
-  const doMatureBase=()=>wrap("matureBase",async()=>{
-    const s=getS();ae(`ADVANCE TO MATURITY (base) #${repo1Id} ...`,"y");
-    const tx=await s.forceMaturity(repo1Id,await G());await tx.wait();
-    ae(`REPO #${repo1Id} MATURED tx=${short(tx.hash)}`,"g");
-    setHint("Switch to BORROWER >> SETTLE #"+repo1Id);
-  });
-
-  const doSettleBase=()=>wrap("settleBase",async()=>{
-    await ensureApproval(ADDR.USDC,200000n*D6);
-    const s=getS();ae(`SETTLE #${repo1Id} ...`,"g");
-    const tx=await s.settleRepo(repo1Id,await G());await tx.wait();
-    ae(`REPO #${repo1Id} SETTLED - no cascade, clean unwind`,"g");
-    ae("=== SCENARIO A COMPLETE ===","p");setHint("NORMAL UNWIND COMPLETE - all repos settled cleanly");
+    ae("=== DEMO COMPLETE ===","p");setHint("DEMO COMPLETE - Full repo lifecycle + rehypo + cascade demonstrated");
   });
 
   // Role detection
@@ -476,21 +439,21 @@ function App(){
 {/* LEFT: BORROWER (Act1) or LENDER-as-borrower (Act2) */}
 <div style={{borderRight:"1px solid #1a1a1a",display:"flex",flexDirection:"column",overflow:"hidden"}}>
   <div style={{padding:"4px 10px",background:"#111",borderBottom:"1px solid #1a1a1a",display:"flex",justifyContent:"space-between"}}>
-    <span style={{fontWeight:700,fontSize:10,color:(act===1||(act===2&&act2phase===1))?"#a90":"#58a"}}>{(act===1||(act===2&&act2phase===1))?"BORROWER (Alpha)":"LENDER (Bravo) - Rehypo"}</span>
-    <span className="d" style={{fontSize:9}}>{short((act===1||(act===2&&act2phase===1))?borrowerAddr:lenderAddr)}</span>
+    <span style={{fontWeight:700,fontSize:10,color:act===1?"#a90":"#58a"}}>{act===1?"BORROWER (Alpha)":"LENDER (Bravo) - Rehypo"}</span>
+    <span className="d" style={{fontSize:9}}>{short(act===1?borrowerAddr:lenderAddr)}</span>
   </div>
   <div style={{display:"flex",borderBottom:"1px solid #1a1a1a"}}>
     <div style={{flex:1,padding:"4px 10px",borderRight:"1px solid #1a1a1a"}}>
       <div style={{fontSize:8,letterSpacing:"0.1em"}} className="d">USDC</div>
-      <div style={{fontSize:13,fontWeight:700}} className="g">{fmt((act===1||(act===2&&act2phase===1))?bBal.usdc:lBal.usdc)}</div>
+      <div style={{fontSize:13,fontWeight:700}} className="g">{fmt(act===1?bBal.usdc:lBal.usdc)}</div>
     </div>
     <div style={{flex:1,padding:"4px 10px",borderRight:"1px solid #1a1a1a"}}>
       <div style={{fontSize:8,letterSpacing:"0.1em"}} className="d">USYC</div>
-      <div style={{fontSize:13,fontWeight:700}} className="b">{fmtK((act===1||(act===2&&act2phase===1))?bBal.usyc:lBal.usyc)}</div>
+      <div style={{fontSize:13,fontWeight:700}} className="b">{fmtK(act===1?bBal.usyc:lBal.usyc)}</div>
     </div>
     <div style={{flex:1,padding:"4px 10px"}}>
-      <div style={{fontSize:8,letterSpacing:"0.1em"}} className="d">{(act===2&&act2phase===2)?"RT VAL":"USTB"}</div>
-      <div style={{fontSize:13,fontWeight:700}} className="p">{(act===2&&act2phase===2)?fmt(rtValue):fmtK(bBal.ustb)}</div>
+      <div style={{fontSize:8,letterSpacing:"0.1em"}} className="d">{act===1?"USTB":"RT VAL"}</div>
+      <div style={{fontSize:13,fontWeight:700}} className="p">{act===1?fmtK(bBal.ustb):fmt(rtValue)}</div>
     </div>
   </div>
   {act===1?(
@@ -499,10 +462,6 @@ function App(){
       <Btn onClick={doTopUp} disabled={repo1State!=="MARGIN_CALLED"||!isBorrower} warn={repo1State==="MARGIN_CALLED"&&isBorrower} loading={loading==="topup"}>TOP UP</Btn>
       <Btn onClick={doSubReq} disabled={repo1State!=="ACTIVE"||!isBorrower} loading={loading==="subreq"}>SUBSTITUTE</Btn>
       <Btn onClick={doSettle1} active={repo1State==="MATURED"&&isBorrower} disabled={repo1State!=="MATURED"||!isBorrower} loading={loading==="settle1"}>SETTLE</Btn>
-    </div>
-  ):act2phase===1?(
-    <div style={{padding:"5px 8px",display:"flex",gap:4,borderBottom:"1px solid #1a1a1a",flexWrap:"wrap"}}>
-      <Btn onClick={doPropose2} active={!repo1Id&&isBorrower} disabled={!!repo1||!wallet} loading={loading==="propose2"}>NEW REPO</Btn>
     </div>
   ):(
     <div style={{padding:"5px 8px",display:"flex",gap:4,borderBottom:"1px solid #1a1a1a",flexWrap:"wrap"}}>
@@ -567,39 +526,10 @@ function App(){
     {repo1State==="SETTLED"&&<div style={{marginTop:8}}><Btn onClick={doStartAct2} active style={{width:"100%",background:"#1a0a2a",color:"#86c",border:"1px solid #2a1a3a"}}>CONTINUE TO ACT 2 >></Btn></div>}
     </>}
 
-    {act===2&&act2phase===1&&<>
-    <div style={{fontSize:8,letterSpacing:"0.1em",marginBottom:4,color:"#86c"}}>ACT 2: BASE REPO SETUP</div>
-    <div style={{fontSize:9,color:"#555",marginBottom:8,lineHeight:1.5}}>Step 1: Create a new repo so Lender gets RT.<br/>Then Lender will rehypo the RT.</div>
-    </>}
-
-    {act===2&&act2phase===2&&!scenario&&<>
-    <div style={{fontSize:8,letterSpacing:"0.1em",marginBottom:6,color:"#86c"}}>SELECT SCENARIO</div>
-    <div style={{marginBottom:6}}>
-      <Btn onClick={()=>{setScenario("A");ae("SCENARIO A: Normal unwind (rehypo first)","g");setHint("PROTOCOL >> MATURE REHYPO #"+repo2Id)}} style={{width:"100%",background:"#0a1a0a",color:"#4a4",border:"1px solid #1a3a1a"}}>A: NORMAL UNWIND</Btn>
-      <div style={{fontSize:8,color:"#555",padding:"3px 0",lineHeight:1.4}}>Settle rehypo first → then base.<br/>Clean exit, no cascade.</div>
-    </div>
-    <div style={{marginBottom:6}}>
-      <Btn onClick={()=>{setScenario("B");ae("SCENARIO B: Cascade risk (base first)","r");setHint("PROTOCOL >> MATURE BASE #"+repo1Id)}} style={{width:"100%",background:"#2a0a0a",color:"#c44",border:"1px solid #3a1a1a"}}>B: CASCADE RISK</Btn>
-      <div style={{fontSize:8,color:"#555",padding:"3px 0",lineHeight:1.4}}>Settle base first → RT burned →<br/>cascade margin call → liquidation.</div>
-    </div>
-    </>}
-
-    {act===2&&act2phase===2&&scenario==="A"&&<>
-    <div style={{fontSize:8,letterSpacing:"0.1em",marginBottom:4,color:"#4a4"}}>SCENARIO A: NORMAL UNWIND</div>
-    <div style={{marginBottom:6}}><Btn onClick={doMatureRehypo} disabled={repo2State!=="ACTIVE"||!wallet} loading={loading==="matureRehypo"} style={{width:"100%"}}>1. MATURE REHYPO #{repo2Id}</Btn></div>
-    <div style={{marginBottom:6}}><Btn onClick={doSettleRehypo} disabled={repo2State!=="MATURED"||!isLender} loading={loading==="settleRehypo"} style={{width:"100%"}}>2. SETTLE REHYPO #{repo2Id}</Btn></div>
-    <div style={{marginBottom:6}}><Btn onClick={doMatureBase} disabled={repo1State!=="ACTIVE"||!wallet} loading={loading==="matureBase"} style={{width:"100%"}}>3. MATURE BASE #{repo1Id}</Btn></div>
-    <div style={{marginBottom:6}}><Btn onClick={doSettleBase} disabled={repo1State!=="MATURED"||!isBorrower} loading={loading==="settleBase"} style={{width:"100%"}}>4. SETTLE BASE #{repo1Id}</Btn></div>
-    </>}
-
-    {act===2&&act2phase===2&&scenario==="B"&&<>
-    <div style={{fontSize:8,letterSpacing:"0.1em",marginBottom:4,color:"#c44"}}>SCENARIO B: CASCADE RISK</div>
-    <div style={{marginBottom:6}}><Btn onClick={doMaturity2} disabled={repo1State!=="ACTIVE"||!wallet} loading={loading==="maturity2"} style={{width:"100%"}}>1. MATURE BASE #{repo1Id}</Btn></div>
-    <div style={{marginBottom:6}}><Btn onClick={doSettle2} disabled={repo1State!=="MATURED"||!isBorrower} loading={loading==="settle2"} style={{width:"100%"}}>2. SETTLE BASE #{repo1Id}</Btn></div>
-    <div style={{marginBottom:6}}><Btn onClick={doForceLiquidate} disabled={repo2State!=="MARGIN_CALLED"||!wallet} warn loading={loading==="forceLiq"} style={{width:"100%"}}>3. FORCE LIQUIDATE #{repo2Id}</Btn></div>
-    </>}
-
-    {act===2&&act2phase===2&&<>
+    {act===2&&<>
+    <div style={{fontSize:8,letterSpacing:"0.1em",marginBottom:4,color:"#86c"}}>ACT 2: REHYPOTHECATION</div>
+    <div style={{marginBottom:6}}><Btn onClick={doMaturity2} disabled={repo1State!=="ACTIVE"||!wallet} loading={loading==="maturity2"} style={{width:"100%"}}>MATURE #{repo1Id}</Btn></div>
+    <div style={{marginBottom:6}}><Btn onClick={doForceLiquidate} disabled={repo2State!=="MARGIN_CALLED"||!wallet} warn loading={loading==="forceLiq"} style={{width:"100%"}}>FORCE LIQUIDATE #{repo2Id}</Btn></div>
     <div style={{padding:"6px 0",borderTop:"1px solid #1a1a1a",marginTop:6}}>
       <div style={{fontSize:8,letterSpacing:"0.1em",marginBottom:3}} className="d">REHYPO CHAIN</div>
       <div style={{fontSize:9,color:"#86c",lineHeight:1.6}}>
@@ -632,24 +562,24 @@ function App(){
   </div>
 </div>
 
-{/* RIGHT: LENDER (Act1 + Act2p1) or CHARLIE (Act2p2) */}
+{/* RIGHT: LENDER (Act1) or CHARLIE (Act2) */}
 <div style={{display:"flex",flexDirection:"column",overflow:"hidden"}}>
   <div style={{padding:"4px 10px",background:"#111",borderBottom:"1px solid #1a1a1a",display:"flex",justifyContent:"space-between"}}>
-    <span style={{fontWeight:700,fontSize:10,color:(act===1||(act===2&&act2phase===1))?"#58a":"#86c"}}>{(act===1||(act===2&&act2phase===1))?"LENDER (Bravo)":"CHARLIE (TD_Charlie)"}</span>
-    <span className="d" style={{fontSize:9}}>{short((act===1||(act===2&&act2phase===1))?lenderAddr:charlieAddr)}</span>
+    <span style={{fontWeight:700,fontSize:10,color:act===1?"#58a":"#86c"}}>{act===1?"LENDER (Bravo)":"CHARLIE (TD_Charlie)"}</span>
+    <span className="d" style={{fontSize:9}}>{short(act===1?lenderAddr:charlieAddr)}</span>
   </div>
   <div style={{display:"flex",borderBottom:"1px solid #1a1a1a"}}>
     <div style={{flex:1,padding:"4px 10px",borderRight:"1px solid #1a1a1a"}}>
       <div style={{fontSize:8,letterSpacing:"0.1em"}} className="d">USDC</div>
-      <div style={{fontSize:13,fontWeight:700}} className="g">{fmt((act===1||(act===2&&act2phase===1))?lBal.usdc:cBal.usdc)}</div>
+      <div style={{fontSize:13,fontWeight:700}} className="g">{fmt(act===1?lBal.usdc:cBal.usdc)}</div>
     </div>
     <div style={{flex:1,padding:"4px 10px",borderRight:"1px solid #1a1a1a"}}>
-      <div style={{fontSize:8,letterSpacing:"0.1em"}} className="d">{(act===2&&act2phase===2)?"RT HELD":"USYC"}</div>
-      <div style={{fontSize:13,fontWeight:700}} className={(act===2&&act2phase===2)?"p":"b"}>{(act===2&&act2phase===2)?(rtHolder&&charlieAddr&&rtHolder.toLowerCase()===charlieAddr.toLowerCase()?`RT#${repo1Id}`:"--"):fmtK(lBal.usyc)}</div>
+      <div style={{fontSize:8,letterSpacing:"0.1em"}} className="d">{act===1?"USYC":"RT HELD"}</div>
+      <div style={{fontSize:13,fontWeight:700}} className={act===1?"b":"p"}>{act===1?fmtK(lBal.usyc):(rtHolder&&charlieAddr&&rtHolder.toLowerCase()===charlieAddr.toLowerCase()?`RT#${repo1Id}`:"--")}</div>
     </div>
     <div style={{flex:1,padding:"4px 10px"}}>
-      <div style={{fontSize:8,letterSpacing:"0.1em"}} className="d">{(act===2&&act2phase===2)?"RT VAL":"USTB"}</div>
-      <div style={{fontSize:13,fontWeight:700}} className="p">{(act===2&&act2phase===2)?fmt(rtValue):fmtK(lBal.ustb)}</div>
+      <div style={{fontSize:8,letterSpacing:"0.1em"}} className="d">{act===1?"USTB":"RT VAL"}</div>
+      <div style={{fontSize:13,fontWeight:700}} className="p">{act===1?fmtK(lBal.ustb):fmt(rtValue)}</div>
     </div>
   </div>
   {act===1?(
@@ -657,17 +587,13 @@ function App(){
       <Btn onClick={doAccept} active={repo1State==="PROPOSED"&&isLender} disabled={repo1State!=="PROPOSED"||!wallet||isBorrower} loading={loading==="accept"}>ACCEPT #{repo1Id||"?"}</Btn>
       <Btn onClick={doSubApprove} disabled={repo1State!=="ACTIVE"||!isLender} loading={loading==="subappr"}>APPROVE SUB</Btn>
     </div>
-  ):(act2phase===1)?(
-    <div style={{padding:"5px 8px",display:"flex",gap:4,borderBottom:"1px solid #1a1a1a",flexWrap:"wrap"}}>
-      <Btn onClick={doAccept2} active={repo1State==="PROPOSED"&&isLender} disabled={repo1State!=="PROPOSED"||!isLender} loading={loading==="accept2"}>ACCEPT #{repo1Id||"?"}</Btn>
-    </div>
   ):(
     <div style={{padding:"5px 8px",display:"flex",gap:4,borderBottom:"1px solid #1a1a1a",flexWrap:"wrap"}}>
       <Btn onClick={doAcceptRehypo} active={repo2State==="PROPOSED"&&isCharlie} disabled={repo2State!=="PROPOSED"||!isCharlie} loading={loading==="acceptRehypo"}>ACCEPT REHYPO #{repo2Id||"?"}</Btn>
     </div>
   )}
   <div style={{flex:1,overflow:"auto"}}>
-    {(act===1||(act===2&&act2phase===1))&&repo1&&repo1State!=="PROPOSED"?(
+    {act===1&&repo1&&repo1State!=="PROPOSED"?(
       <table>
         <thead><tr><th colSpan={4} style={{borderBottom:"1px solid #222"}}>REPO #{repo1Id} <span className={stc(repo1State)}>{repo1State}</span></th></tr></thead>
         <tbody>
@@ -676,14 +602,14 @@ function App(){
           {settlement1&&repo1State==="SETTLED"&&<tr><td className="d">RECV</td><td className="g" style={{fontWeight:700}}>{fmt(settlement1.net)}</td><td className="d" colSpan={2}>settled</td></tr>}
         </tbody>
       </table>
-    ):(act===1||(act===2&&act2phase===1))&&repo1&&repo1State==="PROPOSED"?(
+    ):act===1&&repo1&&repo1State==="PROPOSED"?(
       <table>
         <thead><tr><th colSpan={4} style={{borderBottom:"1px solid #222"}}>INCOMING #{repo1Id} <span className="y">PROPOSED</span></th></tr></thead>
         <tbody>
           <tr><td className="d">FROM</td><td className="w">{short(borrowerAddr)}</td><td className="d">CASH</td><td className="w">{fmt(repo1.cashAmount)}</td></tr>
         </tbody>
       </table>
-    ):act===2&&act2phase===2&&repo2?(
+    ):act===2&&repo2?(
       <table>
         <thead><tr><th colSpan={4} style={{borderBottom:"1px solid #333",color:"#86c"}}>REHYPO #{repo2Id} <span className={stc(repo2State)}>{repo2State}</span></th></tr></thead>
         <tbody>
