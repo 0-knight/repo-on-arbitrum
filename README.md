@@ -18,34 +18,32 @@ Current DeFi lending (Aave, Morpho, Compound) is pool-based. For institutions, t
 | **Balance Sheet** | Full value both sides, SLR burden | Netting possible, SLR optimized for Basel III |
 | **Rate Structure** | Floating only, no maturity | Fixed-term, fixed-rate → yield curve → derivatives |
 
----
+## Why This Exists
 
-# Why This Exists
-
-Arbitrum enables **tokenized U.S. Treasuries to exist on-chain**. Treasury bills, notes, and bonds — real government securities represented as ERC-20 tokens, tradable 24/7.
+Arbitrum enables **tokenized U.S. Treasuries to exist on-chain**. Treasury bills, notes, and bonds — real government debt instruments represented as ERC-20 tokens, tradable 24/7.
 
 But putting Treasuries on-chain is only the first step. The next question is: **what can you do with them?**
 
-In traditional finance, the answer is obvious.
+In traditional finance, the answer is obvious.  
 You **finance them through the repo market**.
 
-A dealer holding $100M in U.S. Treasuries does not let them sit idle. Those securities are continuously used as collateral to borrow cash, fund trading positions, and manage liquidity. The Treasury repo market is one of the most critical funding markets in the global financial system.
+A dealer holding $100M in U.S. Treasuries does not let them sit idle. Those Treasuries are continuously used as collateral to borrow cash, fund trading positions, and manage liquidity. The Treasury repo market is one of the most critical funding markets in the global financial system.
 
 Today, the U.S. Treasury repo market processes **several trillion dollars of transactions every single day**. It is the primary liquidity backbone for banks, dealers, hedge funds, and money market funds.
 
 However, **on-chain today the only lending primitive is pool-based lending**: Aave, Compound, Morpho.
 
-These protocols were designed for **fungible crypto tokens** like ETH and WBTC. They work well for that purpose. But they are not designed for institutional securities financing, and therefore are not suitable for Treasury repo markets.
+These protocols were designed for **fungible crypto tokens** like ETH and WBTC. They work well for that purpose. But they are not designed for institutional Treasury financing, and therefore are not suitable for Treasury repo markets.
 
 ---
 
-# The Problem with Pools for Securities Financing
+## The Problem with Pools for Treasury Financing
 
-## Tax Treatment
+### Tax Treatment
 
-When securities are deposited into a lending pool smart contract, the transfer of tokens may be interpreted as a **disposition event** under tax rules.
+When Treasuries are deposited into a lending pool smart contract, the transfer of tokens may be interpreted as a **disposition event** under tax rules.
 
-For institutions managing large portfolios of securities, this creates uncertainty around potential capital gains treatment. Even if the intent is simply to borrow cash, the mechanics of transferring assets into a smart contract vault can introduce **tax ambiguity** that institutional participants are unwilling to accept.
+For institutions managing large portfolios of Treasuries, this creates uncertainty around potential capital gains treatment. Even if the intent is simply to borrow cash, the mechanics of transferring assets into a smart contract vault can introduce **tax ambiguity** that institutional participants are unwilling to accept.
 
 In traditional repo markets, this issue does not exist. Repo transactions are clearly classified as **secured financing transactions**, not asset sales.
 
@@ -53,49 +51,49 @@ Institutional participants require the same clarity on-chain.
 
 ---
 
-## Fragmented Financing
+### Fragmented Financing
 
 Pool-based lending is built around **individual asset markets**.
 
 Each token has its own pool, its own interest rate, and its own collateral parameters.
 
-But in real securities financing markets, **funding is negotiated bilaterally**, not through generalized liquidity pools. Dealers and cash providers agree on specific repo terms including:
+But in real Treasury repo markets, **funding is negotiated bilaterally**, not through generalized liquidity pools. Dealers and cash providers agree on specific repo terms including:
 
-* collateral type
-* haircut
-* interest rate
-* maturity
-* settlement terms
+- collateral type  
+- haircut  
+- interest rate  
+- maturity  
+- settlement terms  
 
 Treasury repo markets operate through **direct collateral agreements**, not through pooled liquidity structures.
 
 ---
 
-## No Collateral Mobility
+### No Collateral Mobility
 
-In lending pools, collateral is **locked in a smart contract vault**. The lender never takes possession of the securities.
+In lending pools, collateral is **locked in a smart contract vault**. The lender never takes possession of the Treasuries themselves.
 
 In traditional repo markets, this would be highly unusual.
 
-When a lender provides cash in a repo transaction, they receive **full title to the securities** for the duration of the repo. This allows the lender to use those securities in their own operations — including pledging them in another repo transaction.
+When a lender provides cash in a repo transaction, they receive **full title to the Treasury collateral** for the duration of the repo. This allows the lender to use those Treasuries in their own operations — including pledging them in another repo transaction.
 
 This practice is called **rehypothecation**, and it is essential to how liquidity flows through the repo market.
 
-Pool-based lending eliminates this possibility, turning high-quality collateral into **immobile capital**.
+Pool-based lending eliminates this possibility, turning high-quality Treasury collateral into **immobile capital**.
 
 ---
 
-# The Solution: On-Chain Treasury Repo
+## The Solution: On-Chain Treasury Repo
 
-Repo — short for **repurchase agreement** — is the standard mechanism used across global financial markets to finance government securities.
+Repo — short for **repurchase agreement** — is the standard mechanism used across global financial markets to finance U.S. Treasuries.
 
 A repo transaction works as follows:
 
-1. A borrower transfers securities to a lender.
-2. The lender provides cash.
-3. The borrower agrees to repurchase the same securities at a later date at a slightly higher price.
+1. A borrower transfers Treasuries to a lender.  
+2. The lender provides cash.  
+3. The borrower agrees to repurchase the same Treasuries at a later date at a slightly higher price.
 
-Economically, this is simply a **secured loan**, where the securities serve as collateral.
+Economically, this is simply a **secured loan**, where the Treasuries serve as collateral.
 
 This structure is used daily across the Treasury market by banks, dealers, hedge funds, and money market funds.
 
@@ -103,11 +101,11 @@ We implemented this structure **directly on-chain on Arbitrum**, using smart con
 
 ---
 
-# Tax-Neutral by Design
+## Tax-Neutral by Design
 
 Repo transactions are legally recognized as **financing arrangements**, not asset sales.
 
-Even though title to the securities temporarily transfers to the lender, the borrower's contractual obligation to repurchase them means the transaction is treated as a **collateralized loan**.
+Even though title to the Treasuries temporarily transfers to the lender, the borrower's contractual obligation to repurchase them means the transaction is treated as a **collateralized loan**.
 
 Because of this, repo transactions typically **do not trigger capital gains realization**.
 
@@ -115,47 +113,47 @@ By replicating the repo structure on-chain, the protocol maintains the same tax 
 
 On-chain, the mechanism is straightforward:
 
-* Treasury tokens transfer from **borrower wallet → lender wallet**
-* a smart contract records the **repurchase obligation**
-* maturity date and repo rate are encoded on-chain
+- Treasury tokens transfer from **borrower wallet → lender wallet**  
+- a smart contract records the **repurchase obligation**  
+- maturity date and repo rate are encoded on-chain  
 
 This maps directly to the legal structure of traditional repo markets.
 
 ---
 
-# Haircuts and Collateralization
+## Haircuts and Collateralization
 
 Every repo transaction includes a **haircut** — the difference between the value of collateral and the cash borrowed.
 
-Haircuts protect the lender from price volatility in the underlying securities.
+Haircuts protect the lender from price volatility in the underlying Treasuries.
 
 Example:
 
-Collateral value: $102M in Treasuries
-Cash borrowed: $100M
+Collateral value: $102M in Treasuries  
+Cash borrowed: $100M  
 Haircut: 2%
 
-Treasury repo markets typically use **very small haircuts** because government securities are considered extremely low risk and highly liquid.
+Treasury repo markets typically use **very small haircuts** because Treasuries are considered extremely low risk and highly liquid.
 
 Our protocol supports configurable haircuts based on:
 
-* collateral type (T-bills, notes, bonds)
-* maturity profile
-* market conditions
+- collateral type (T-bills, notes, bonds)  
+- maturity profile  
+- market conditions  
 
 This allows repo transactions to reflect real-world Treasury financing practices.
 
 ---
 
-# Rehypothecation via Title Transfer
+## Rehypothecation via Title Transfer
 
-One of the most important characteristics of repo markets is that the lender receives **full title to the collateral securities**.
+One of the most important characteristics of repo markets is that the lender receives **full title to the Treasury collateral**.
 
-Because of this, those securities can be used again in another repo transaction.
+Because of this, those Treasuries can be used again in another repo transaction.
 
 For example:
 
-Dealer A pledges $1.02B of Treasuries to Lender B and borrows $1B.
+Dealer A pledges $1.02B of Treasuries to Lender B and borrows $1B.  
 Lender B can then repo those same Treasuries to Lender C to raise additional cash.
 
 This reuse of collateral significantly improves **capital efficiency** and enables liquidity to circulate through the financial system.
@@ -164,14 +162,14 @@ Our protocol enables this through **tokenized title transfer**.
 
 When a repo is initiated:
 
-* Treasury tokens move to the lender's wallet
-* the lender receives a **RepoToken (ERC-721)** representing the repo position
+- Treasury tokens move to the lender's wallet  
+- the lender receives a **RepoToken (ERC-721)** representing the repo position  
 
 That RepoToken can then be used as collateral in a new repo transaction.
 
 ---
 
-# On-Chain Rehypothecation Limits
+## On-Chain Rehypothecation Limits
 
 While rehypothecation increases liquidity, excessive reuse of collateral can introduce systemic risk.
 
@@ -187,11 +185,11 @@ This ensures that collateral reuse stays within predefined safety bounds.
 
 ---
 
-# Manufactured Coupon Payment
+## Manufactured Coupon Payment
 
-Unlike crypto tokens, Treasury securities generate **coupon payments**.
+Unlike crypto tokens, Treasuries generate **coupon payments**.
 
-During the repo term, the lender holds legal title to the securities and therefore receives the coupon payment.
+During the repo term, the lender holds legal title to the Treasuries and therefore receives the coupon payment.
 
 However, the borrower is economically entitled to that income.
 
@@ -209,7 +207,7 @@ This mirrors the mechanism used in traditional Treasury repo markets.
 
 ---
 
-# Transparent Collateral Chains
+## Transparent Collateral Chains
 
 When multiple layers of rehypothecation exist, the system forms a **collateral chain**.
 
@@ -221,16 +219,15 @@ Each RepoToken represents a specific repo position and can be traced through all
 
 Participants can inspect:
 
-* the original collateral
-* repo terms
-* current exposure
-* rehypothecation levels
-* margin health
+- the original Treasury collateral  
+- repo terms  
+- current exposure  
+- rehypothecation levels  
+- margin health  
 
 If an upstream repo settles or unwinds, the protocol automatically triggers margin checks on any downstream positions that depended on that collateral.
 
 This allows risk management to happen **in real time**, rather than through delayed reporting.
-
 
 ## Features
 
